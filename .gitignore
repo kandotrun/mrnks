@@ -23,6 +23,7 @@ build/
 .vercel/
 .wrangler/
 wrangler.toml
+wrangler.jsonc
 
 # Test / coverage
 coverage/

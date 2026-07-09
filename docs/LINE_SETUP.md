@@ -83,11 +83,16 @@ python3 scripts/smoke_line_bot_info.py
 
 まだスクリプトが無い場合は、一時スクリプトで `.dev.vars` を読み、`GET https://api.line.me/v2/bot/info` を呼びます。出力は HTTP status と bot名などに限定し、token値は出しません。
 
-## 未設定のもの
+## 未設定・手動確認が必要なもの
 
-- LIFF ID
-- LIFF endpoint URL
-- 本番 Callback URL
-- 本番 Webhook URL
+- LINE Developers Console 側の Messaging API `Webhook usage` がONになっていること
+  - APIで webhook endpoint は設定・テスト可能
+  - ただし `GET /v2/bot/channel/webhook/endpoint` の `active` が `false` の場合、Console側のON操作が必要
+- 本番 Callback URL が Console 側に反映されていること
 
-これらは Worker/API の公開URLが決まってから確定します。
+## productionで設定済みのもの
+
+- LIFF endpoint URL: `https://mrnks.2-38.com/`
+- Messaging API webhook URL: `https://mrnks.2-38.com/webhook/line`
+
+LIFF ID の実値は client config と Worker secret に設定済みですが、公開repoのドキュメントには直書きしません。

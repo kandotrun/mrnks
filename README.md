@@ -4,6 +4,8 @@
 
 **まるのこし** は、家族の写真・動画を LINE からかんたんに共有しつつ、原本を圧縮せずに保存するための家族アルバムです。
 
+Live: https://mrnks.2-38.com/
+
 「みてね」のような家族導線は保ちつつ、価値の中心は **見ること** よりも **残すこと** に置きます。
 
 ## いま決めていること
@@ -19,6 +21,21 @@
 - [プロダクト・システム設計](docs/DESIGN.md)
 - [MVP実装計画](docs/MVP_PLAN.md)
 - [LINE設定メモ](docs/LINE_SETUP.md)
+- [デプロイ手順](docs/DEPLOYMENT.md)
+
+## MVP実装状況
+
+現在のMVP実装:
+
+- Cloudflare Worker で LIFF UI と API を配信
+- `GET /health`, `GET /api/config`
+- LINE ID token によるログインAPI
+- D1 session / family / media metadata
+- R2 への原本保存
+- SHA-256照合
+- タイムライン一覧
+- 短命URLによる原本ダウンロード
+- LINE webhook 署名検証と案内返信
 
 ## MVPの成功条件
 
