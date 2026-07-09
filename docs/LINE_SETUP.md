@@ -49,7 +49,7 @@ npx wrangler secret put SESSION_SECRET --config apps/api/wrangler.toml
 
 ### LINE Login channel
 
-- Callback URL: `https://<app-domain>/auth/callback`
+- Callback URL: MVPではLIFF endpoint と同じ `https://<app-domain>/` を設定する
 - LIFF endpoint URL: `https://<app-domain>/`
 - LIFF app type: Full / Tall は実機UXで決める
 - Scope: `profile openid`
