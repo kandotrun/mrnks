@@ -18,6 +18,7 @@
 
 - [プロダクト・システム設計](docs/DESIGN.md)
 - [MVP実装計画](docs/MVP_PLAN.md)
+- [LINE設定メモ](docs/LINE_SETUP.md)
 
 ## MVPの成功条件
 
