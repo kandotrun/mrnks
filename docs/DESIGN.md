@@ -1,6 +1,6 @@
 # まるのこし プロダクト・システム設計
 
-最終更新: 2026-07-09
+最終更新: 2026-07-11
 
 ## 1. コンセプト
 
@@ -304,6 +304,20 @@ CREATE TABLE notification_events (
   error_message TEXT
 );
 ```
+
+### 7.8 LINE group bindings
+
+LINEグループは家族アルバムへ紐づけ、グループ由来では `viewer` または `uploader` だけを付与する。`owner` / `admin` は既存の `family_members` を権威とし、LINEグループから昇格させない。
+
+- 招待時: `join` webhookでgroup ID・名称・ハッシュ化した一回限り設定トークンを保存
+- 設定時: 既存familyのowner/adminかつ対象LINEグループの現メンバーであることを検証
+- 利用時: LINE group member profile APIで在籍確認し、group binding付き1時間sessionを発行
+- 通知時: `(media_asset_id, line_group_binding_id)` を一意にclaimして二重送信を防ぐ
+- 画像: 原本とは別の1MB以下JPEG/PNGだけを、推測困難なURLからLINEへ配信
+
+### 7.9 notification deliveries
+
+`line_notification_deliveries` は `pending` / `sent` / `failed`、LINE retry key、エラー概要を保持する。原本URLやsession tokenは保存しない。
 
 ## 8. API設計
 

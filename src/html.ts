@@ -36,7 +36,7 @@ export function renderAppHtml(): string {
     }
     a { color: var(--link); text-decoration: none; }
     a:hover, a:focus { color: #005580; text-decoration: underline; }
-    button, input { font: inherit; }
+    button, input, select { font: inherit; }
     .container {
       width: 940px;
       max-width: calc(100% - 32px);
@@ -229,6 +229,31 @@ export function renderAppHtml(): string {
       background: linear-gradient(to bottom, #ffffff, #e6e6e6);
       cursor: pointer;
     }
+    .group-setup { background-color: var(--surface); }
+    .form-row { margin-bottom: 12px; }
+    .form-row label {
+      display: block;
+      margin-bottom: 4px;
+      font-weight: 600;
+    }
+    .form-control {
+      display: block;
+      width: 100%;
+      min-height: 34px;
+      padding: 6px 8px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: #333333;
+      background: #ffffff;
+    }
+    .checkbox-row {
+      display: flex;
+      margin-bottom: 14px;
+      align-items: center;
+      gap: 7px;
+    }
+    .checkbox-row input { margin: 0; }
+    .group-setup-result { margin: 10px 0 0; }
     .user-state { margin: 12px 0 0; }
     .status-well, .gallery-well { background-color: var(--surface); }
     .status {
@@ -563,6 +588,28 @@ export function renderAppHtml(): string {
     </div>
   </section>
 
+  <section id="groupSetupPanel" class="well group-setup" hidden>
+    <h2>LINEグループを連携</h2>
+    <p id="groupSetupDescription" class="help-block">グループを家族アルバムへ紐づけます。</p>
+    <div class="form-row">
+      <label for="groupFamilySelect">連携するアルバム</label>
+      <select id="groupFamilySelect" class="form-control"></select>
+    </div>
+    <div class="form-row">
+      <label for="groupRoleSelect">グループメンバーの権限</label>
+      <select id="groupRoleSelect" class="form-control">
+        <option value="viewer">閲覧のみ</option>
+        <option value="uploader">閲覧・投稿</option>
+      </select>
+    </div>
+    <label class="checkbox-row" for="groupNotificationsEnabled">
+      <input id="groupNotificationsEnabled" type="checkbox" checked />
+      新しいアップロードを写真と投稿者名つきで通知する
+    </label>
+    <button id="groupBindButton" class="btn btn-success" type="button">この設定で連携</button>
+    <p id="groupSetupResult" class="group-setup-result muted"></p>
+  </section>
+
   <section class="well status-well">
     <h2>状態</h2>
     <div id="status" class="status" role="status" aria-live="polite">起動中...</div>
@@ -605,10 +652,29 @@ export function renderAppHtml(): string {
   </div>
 </dialog>
 <script type="module">
+function getAppSearchParams() {
+  const params = new URLSearchParams(window.location.search);
+  const liffState = params.get('liff.state');
+  if (!liffState) return params;
+  const queryStart = liffState.indexOf('?');
+  const nestedQuery = queryStart >= 0
+    ? liffState.slice(queryStart + 1)
+    : (liffState.charAt(0) === '?' ? liffState.slice(1) : liffState);
+  const nested = new URLSearchParams(nestedQuery);
+  for (const [key, value] of nested.entries()) {
+    if (!params.has(key)) params.set(key, value);
+  }
+  return params;
+}
+
+const appParams = getAppSearchParams();
 const state = {
   config: null,
   session: null,
   familyId: null,
+  groupBindToken: appParams.get('groupBind'),
+  groupBindingId: appParams.get('groupBinding'),
+  pendingGroup: null,
   assets: [],
   activeAssetId: null,
   mediaOffset: 0,
@@ -648,6 +714,18 @@ async function boot() {
   await loginWithLiff();
 }
 
+function applySession(session) {
+  state.session = session;
+  state.familyId = session.families?.[0]?.id || null;
+  const family = session.families?.find((item) => item.id === state.familyId) || null;
+  const roleLabels = { owner: '管理者', admin: '管理者', uploader: '閲覧・投稿', viewer: '閲覧のみ' };
+  const displayName = session.user?.displayName || 'LINE user';
+  $('userText').textContent = family
+    ? displayName + ' ・ ' + family.name + '（' + (roleLabels[family.role] || family.role) + '）'
+    : displayName;
+  $('uploadButton').disabled = !family || !['owner', 'admin', 'uploader'].includes(family.role);
+}
+
 async function loginWithLiff() {
   if (!window.liff?.isLoggedIn()) {
     window.liff.login();
@@ -655,24 +733,82 @@ async function loginWithLiff() {
   }
   const idToken = window.liff.getIDToken();
   if (!idToken) throw new Error('ID tokenを取得できませんでした。');
-  state.session = await api('/api/auth/line', {
+  const session = await api('/api/auth/line', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ idToken }),
+    body: JSON.stringify({
+      idToken,
+      groupBindingId: state.groupBindingId || undefined,
+    }),
   });
-  state.familyId = state.session.families?.[0]?.id || null;
-  $('userText').textContent = state.session.user?.displayName || 'LINE user';
+  applySession(session);
   status('ログインOK: ' + $('userText').textContent);
+  if (state.groupBindToken) {
+    await loadPendingGroupSetup().catch((error) => {
+      $('groupSetupPanel').hidden = false;
+      $('groupSetupResult').textContent = '設定を読み込めません: ' + error.message;
+    });
+  }
   await loadMedia();
 }
 
 async function ensureSession() {
   if (state.session && state.familyId) return;
   try {
-    state.session = await api('/api/auth/session');
-    state.familyId = state.session.families?.[0]?.id || null;
+    const session = await api('/api/auth/session');
+    if (state.groupBindingId && session.groupBindingId !== state.groupBindingId) {
+      await loginWithLiff();
+      return;
+    }
+    applySession(session);
   } catch {
     await loginWithLiff();
+  }
+}
+
+async function loadPendingGroupSetup() {
+  const data = await api('/api/line-groups/pending/' + encodeURIComponent(state.groupBindToken));
+  state.pendingGroup = data.group;
+  $('groupSetupPanel').hidden = false;
+  $('groupSetupDescription').textContent = '「' + data.group.name + '」を、どのアルバムへ連携するか選んでください。';
+  const select = $('groupFamilySelect');
+  select.innerHTML = '';
+  for (const family of data.families || []) {
+    const option = document.createElement('option');
+    option.value = family.id;
+    option.textContent = family.name;
+    select.appendChild(option);
+  }
+  if (state.familyId && [...select.options].some((option) => option.value === state.familyId)) {
+    select.value = state.familyId;
+  }
+}
+
+async function bindPendingGroup() {
+  if (!state.groupBindToken || !state.pendingGroup) throw new Error('グループ設定情報がありません。');
+  const button = $('groupBindButton');
+  button.disabled = true;
+  $('groupSetupResult').textContent = '連携中...';
+  try {
+    const familyId = $('groupFamilySelect').value;
+    const result = await api('/api/line-groups/bind', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        token: state.groupBindToken,
+        familyId,
+        role: $('groupRoleSelect').value,
+        notificationsEnabled: $('groupNotificationsEnabled').checked,
+      }),
+    });
+    state.groupBindingId = result.group.id;
+    state.familyId = familyId;
+    $('groupSetupResult').textContent = '連携しました。グループへ確認メッセージを送信済みです。';
+    button.textContent = '連携済み';
+  } catch (error) {
+    button.disabled = false;
+    $('groupSetupResult').textContent = 'ERROR: ' + error.message;
+    throw error;
   }
 }
 
@@ -680,6 +816,82 @@ async function sha256Hex(file) {
   const buffer = await file.arrayBuffer();
   const digest = await crypto.subtle.digest('SHA-256', buffer);
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function decodeImageFile(file) {
+  if (typeof window.createImageBitmap === 'function') {
+    try {
+      const bitmap = await window.createImageBitmap(file, { imageOrientation: 'from-image' });
+      return {
+        source: bitmap,
+        width: bitmap.width,
+        height: bitmap.height,
+        cleanup: () => bitmap.close(),
+      };
+    } catch {
+      // Safari can still decode formats such as HEIC through an <img> element.
+    }
+  }
+
+  const objectUrl = URL.createObjectURL(file);
+  const image = new Image();
+  image.decoding = 'async';
+  image.src = objectUrl;
+  try {
+    if (typeof image.decode === 'function') await image.decode();
+    else await new Promise((resolve, reject) => {
+      image.onload = resolve;
+      image.onerror = reject;
+    });
+    return {
+      source: image,
+      width: image.naturalWidth,
+      height: image.naturalHeight,
+      cleanup: () => URL.revokeObjectURL(objectUrl),
+    };
+  } catch (error) {
+    URL.revokeObjectURL(objectUrl);
+    throw error;
+  }
+}
+
+function canvasToJpeg(canvas, quality) {
+  return new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', quality));
+}
+
+async function createNotificationPreview(file) {
+  if (!file.type.startsWith('image/') || file.name.toLowerCase().endsWith('.dng')) return null;
+  let decoded;
+  try {
+    decoded = await decodeImageFile(file);
+  } catch {
+    return null;
+  }
+
+  try {
+    let maxDimension = 1280;
+    let quality = 0.82;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const scale = Math.min(1, maxDimension / Math.max(decoded.width, decoded.height));
+      const width = Math.max(1, Math.round(decoded.width * scale));
+      const height = Math.max(1, Math.round(decoded.height * scale));
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const context = canvas.getContext('2d');
+      if (!context) return null;
+      context.fillStyle = '#ffffff';
+      context.fillRect(0, 0, width, height);
+      context.drawImage(decoded.source, 0, 0, width, height);
+      const blob = await canvasToJpeg(canvas, quality);
+      if (blob && blob.size <= 1000000) return blob;
+      maxDimension = Math.max(480, Math.round(maxDimension * 0.78));
+      quality = Math.max(0.5, quality - 0.1);
+    }
+    return null;
+  } finally {
+    decoded.cleanup();
+  }
 }
 
 async function uploadFiles() {
@@ -691,16 +903,26 @@ async function uploadFiles() {
   for (const file of files) {
     appendStatus('hash計算中: ' + file.name);
     const hash = await sha256Hex(file);
+    const notificationPreview = await createNotificationPreview(file);
+    const headers = {
+      'x-file-name': encodeURIComponent(file.name),
+      'x-client-sha256': hash,
+      'x-client-last-modified': new Date(file.lastModified).toISOString(),
+    };
+    let uploadBody = file;
+    if (notificationPreview && file.size <= 40 * 1024 * 1024) {
+      const form = new FormData();
+      form.append('original', file, file.name);
+      form.append('notificationPreview', notificationPreview, 'preview.jpg');
+      uploadBody = form;
+    } else {
+      headers['content-type'] = file.type || 'application/octet-stream';
+    }
     appendStatus('送信中: ' + file.name + ' (' + Math.round(file.size / 1024) + 'KB)');
     const result = await api('/api/families/' + encodeURIComponent(state.familyId) + '/media', {
       method: 'PUT',
-      headers: {
-        'content-type': file.type || 'application/octet-stream',
-        'x-file-name': encodeURIComponent(file.name),
-        'x-client-sha256': hash,
-        'x-client-last-modified': new Date(file.lastModified).toISOString(),
-      },
-      body: file,
+      headers,
+      body: uploadBody,
     });
     appendStatus('保存OK: ' + result.asset.originalFilename + ' sha256=' + result.asset.sha256.slice(0, 12) + '...');
   }
@@ -942,6 +1164,7 @@ async function loadMedia(reset = true) {
 $('loginButton').addEventListener('click', () => loginWithLiff().catch((e) => status('ERROR: ' + e.message)));
 $('refreshButton').addEventListener('click', () => boot().catch((e) => status('ERROR: ' + e.message)));
 $('uploadButton').addEventListener('click', () => uploadFiles().catch((e) => status('ERROR: ' + e.message)));
+$('groupBindButton').addEventListener('click', () => bindPendingGroup().catch((e) => appendStatus('グループ連携ERROR: ' + e.message)));
 $('loadMediaButton').addEventListener('click', () => loadMedia(true).catch((e) => status('ERROR: ' + e.message)));
 $('loadMoreMediaButton').addEventListener('click', () => loadMedia(false).catch((e) => status('ERROR: ' + e.message)));
 $('galleryCloseButton').addEventListener('click', closeGallery);

@@ -71,12 +71,13 @@ curl -fsS https://mrnks.2-38.com/api/config
 
 原本保存の実動作は、短命の synthetic session を D1 に作成して以下を確認します。
 
-1. `PUT /api/families/:familyId/media` で原本保存
+1. `PUT /api/families/:familyId/media` で原本とLINE通知用プレビューをmultipart保存
 2. R2保存後のSHA-256一致
 3. `GET /api/families/:familyId/media` で一覧反映
 4. `POST /api/media/:assetId/download-url` で短命URL発行
 5. `GET /api/download/:token` でダウンロードした原本のSHA-256一致
-6. synthetic D1 rows と R2 object を削除
+6. LINE通知用URLが原本ではなく1MB以下の派生プレビューだけを返すこと
+7. synthetic D1 rows と R2 object を削除
 
 ## LINE設定
 

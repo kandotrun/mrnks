@@ -15,6 +15,7 @@ import {
   randomId,
   sha256Hex,
   textResponse,
+  timingSafeEqual,
   verifyLineSignature,
 } from './core';
 import { renderAppHtml } from './html';
@@ -37,6 +38,7 @@ interface AuthedUser {
   id: string;
   displayName: string | null;
   pictureUrl: string | null;
+  groupBindingId: string | null;
   families: FamilySummary[];
 }
 
@@ -52,8 +54,41 @@ interface LineVerifyResponse {
   picture?: string;
 }
 
+interface LineWebhookSource {
+  type: 'user' | 'group' | 'room';
+  userId?: string;
+  groupId?: string;
+  roomId?: string;
+}
+
+interface LineWebhookEvent {
+  type: string;
+  replyToken?: string;
+  webhookEventId?: string;
+  source?: LineWebhookSource;
+  message?: { type?: string };
+  left?: { members?: Array<{ type?: string; userId?: string }> };
+}
+
+interface LineGroupSummary {
+  groupId: string;
+  groupName: string;
+  pictureUrl?: string;
+}
+
+interface ActiveLineGroupBinding {
+  id: string;
+  line_group_id: string;
+  family_id: string;
+  default_role: 'uploader' | 'viewer';
+  group_name: string;
+  family_name: string;
+}
+
 const SESSION_TTL_SECONDS = 60 * 60 * 24 * 30;
+const GROUP_SESSION_TTL_SECONDS = 60 * 60;
 const DOWNLOAD_TTL_SECONDS = 60 * 10;
+const LINE_PREVIEW_MAX_BYTES = 1_000_000;
 const DNG_HEADER_READ_BYTES = 1024 * 1024;
 const MEDIA_PAGE_SIZE = 60;
 const MAX_MEDIA_OFFSET = 1_000_000;
@@ -104,13 +139,30 @@ async function route(request: Request, env: Env, ctx?: ExecutionContext): Promis
   if (request.method === 'POST' && path === '/api/auth/logout') return handleLogout();
   if (request.method === 'POST' && path === '/webhook/line') return handleLineWebhook(request, env, ctx);
   if (request.method === 'GET' && path === '/api/line/bot-info') return handleLineBotInfo(env);
+  if (request.method === 'POST' && path === '/api/line-groups/bind') return handleBindLineGroup(request, env);
+
+  const pendingLineGroupMatch = path.match(/^\/api\/line-groups\/pending\/([^/]+)$/);
+  if (pendingLineGroupMatch && request.method === 'GET') {
+    return handlePendingLineGroup(request, env, decodeURIComponent(pendingLineGroupMatch[1]));
+  }
 
   const familyMediaMatch = path.match(/^\/api\/families\/([^/]+)\/media$/);
   if (familyMediaMatch && request.method === 'GET') return handleListMedia(request, env, decodeURIComponent(familyMediaMatch[1]));
-  if (familyMediaMatch && request.method === 'PUT') return handleUploadMedia(request, env, decodeURIComponent(familyMediaMatch[1]));
+  if (familyMediaMatch && request.method === 'PUT') return handleUploadMedia(request, env, decodeURIComponent(familyMediaMatch[1]), ctx);
 
-  const previewMatch = path.match(/^\/api\/media\/([^/]+)\/preview$/);
-  if (previewMatch && request.method === 'GET') return handleMediaPreview(request, env, decodeURIComponent(previewMatch[1]));
+  const linePreviewMatch = path.match(/^\/api\/line-preview\/([^/]+)\/([a-f0-9]{64})$/);
+  if (linePreviewMatch && request.method === 'GET') {
+    return handleLineNotificationPreview(
+      env,
+      decodeURIComponent(linePreviewMatch[1]),
+      linePreviewMatch[2],
+    );
+  }
+
+  const mediaPreviewMatch = path.match(/^\/api\/media\/([^/]+)\/preview$/);
+  if (mediaPreviewMatch && request.method === 'GET') {
+    return handleMediaPreview(request, env, decodeURIComponent(mediaPreviewMatch[1]));
+  }
 
   const contentMatch = path.match(/^\/api\/media\/([^/]+)\/content$/);
   if (contentMatch && request.method === 'GET') return handleMediaContent(request, env, decodeURIComponent(contentMatch[1]));
@@ -135,48 +187,122 @@ function handleConfig(env: Env): Response {
 }
 
 async function handleLineAuth(request: Request, env: Env): Promise<Response> {
-  const body = await request.json().catch(() => null) as { idToken?: string } | null;
+  const body = await request.json().catch(() => null) as { idToken?: string; groupBindingId?: string } | null;
   if (!body?.idToken) return jsonResponse({ error: 'id_token_required' }, { status: 400 });
 
   const profile = await verifyLineIdToken(body.idToken, env.LINE_LOGIN_CHANNEL_ID);
   const user = await upsertLineUser(env, profile);
-  const families = await ensureDefaultFamily(env, user.id);
+  let groupBinding: ActiveLineGroupBinding | null = null;
+  let families: FamilySummary[];
+  if (body.groupBindingId) {
+    groupBinding = await loadActiveLineGroupBinding(env, body.groupBindingId);
+    if (!groupBinding) throw new HttpError(404, 'line_group_binding_not_found');
+    await verifyLineGroupMember(env, groupBinding.line_group_id, profile.sub);
+    families = await listFamilies(env, user.id, groupBinding.id);
+  } else {
+    families = await ensureDefaultFamily(env, user.id);
+  }
+
   const token = randomId('ses');
   const tokenHash = await hashSecretToken(token, env.SESSION_SECRET);
   const createdAt = nowIso();
-  const expiresAt = new Date(Date.now() + SESSION_TTL_SECONDS * 1000).toISOString();
+  const ttlSeconds = groupBinding ? GROUP_SESSION_TTL_SECONDS : SESSION_TTL_SECONDS;
+  const expiresAt = new Date(Date.now() + ttlSeconds * 1000).toISOString();
 
   await env.DB.prepare(
-    'INSERT INTO sessions (id, user_id, token_hash, created_at, expires_at) VALUES (?, ?, ?, ?, ?)',
-  ).bind(randomId('session'), user.id, tokenHash, createdAt, expiresAt).run();
+    `INSERT INTO sessions (
+      id, user_id, token_hash, line_group_binding_id, group_membership_verified_at, created_at, expires_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).bind(
+    randomId('session'),
+    user.id,
+    tokenHash,
+    groupBinding?.id ?? null,
+    groupBinding ? createdAt : null,
+    createdAt,
+    expiresAt,
+  ).run();
 
   return jsonResponse(
-    { user: publicUser(user), families },
-    { headers: { 'set-cookie': createSessionCookie(token, SESSION_TTL_SECONDS) } },
+    { user: publicUser(user), families, groupBindingId: groupBinding?.id ?? null },
+    { headers: { 'set-cookie': createSessionCookie(token, ttlSeconds) } },
   );
 }
 
 async function handleSession(request: Request, env: Env): Promise<Response> {
   const user = await requireUser(request, env);
-  return jsonResponse({ user: publicUser(user), families: user.families });
+  return jsonResponse({
+    user: publicUser(user),
+    families: user.families,
+    groupBindingId: user.groupBindingId,
+  });
 }
 
 function handleLogout(): Response {
   return jsonResponse({ ok: true }, { headers: { 'set-cookie': clearSessionCookie() } });
 }
 
-async function handleUploadMedia(request: Request, env: Env, familyId: string): Promise<Response> {
+async function handleUploadMedia(
+  request: Request,
+  env: Env,
+  familyId: string,
+  ctx?: ExecutionContext,
+): Promise<Response> {
   const user = await requireUser(request, env);
   await requireFamilyRole(user, familyId, ['owner', 'admin', 'uploader']);
 
-  const rawFilename = decodeURIComponent(request.headers.get('x-file-name') || 'original-file');
-  const mimeType = normalizeMediaMimeType(rawFilename, request.headers.get('content-type'));
-  const clientHash = request.headers.get('x-client-sha256')?.toLowerCase() || null;
+  const contentType = request.headers.get('content-type') || '';
+  let rawFilename: string;
+  let mimeType: string;
+  let bytes: Uint8Array;
+  let notificationPreviewBytes: Uint8Array | null = null;
+  let notificationPreviewMimeType: 'image/jpeg' | 'image/png' | null = null;
+
+  if (contentType.toLowerCase().startsWith('multipart/form-data')) {
+    const form = await request.formData();
+    const original = form.get('original');
+    if (!(original instanceof File)) throw new HttpError(400, 'original_file_required');
+    rawFilename = original.name || decodeUploadFilename(request.headers.get('x-file-name'));
+    mimeType = normalizeMediaMimeType(rawFilename, original.type);
+    bytes = new Uint8Array(await original.arrayBuffer());
+
+    const preview = form.get('notificationPreview');
+    if (preview instanceof File && preview.size > 0) {
+      const previewMime = normalizeMediaMimeType(preview.name || 'preview.jpg', preview.type);
+      const previewBytes = new Uint8Array(await preview.arrayBuffer());
+      assertLineNotificationPreview(previewBytes, previewMime);
+      notificationPreviewBytes = previewBytes;
+      notificationPreviewMimeType = previewMime as 'image/jpeg' | 'image/png';
+    }
+  } else {
+    rawFilename = decodeUploadFilename(request.headers.get('x-file-name'));
+    mimeType = normalizeMediaMimeType(rawFilename, contentType);
+    bytes = new Uint8Array(await request.arrayBuffer());
+  }
+
+  const clientHash = (
+    request.headers.get('x-client-sha256')
+    || request.headers.get('x-content-sha256')
+  )?.toLowerCase() || null;
   const clientLastModified = request.headers.get('x-client-last-modified') || null;
-  const bytes = new Uint8Array(await request.arrayBuffer());
   const serverHash = await sha256Hex(bytes);
   if (clientHash && clientHash !== serverHash) {
     return jsonResponse({ error: 'sha256_mismatch', serverHash }, { status: 400 });
+  }
+
+  if (!notificationPreviewBytes) {
+    const dngPreview = extractLinePreviewFromDng(bytes, rawFilename, mimeType);
+    if (dngPreview) {
+      notificationPreviewBytes = dngPreview;
+      notificationPreviewMimeType = 'image/jpeg';
+    } else if (
+      bytes.byteLength <= LINE_PREVIEW_MAX_BYTES
+      && (mimeType === 'image/jpeg' || mimeType === 'image/png')
+    ) {
+      assertLineNotificationPreview(bytes, mimeType);
+      notificationPreviewBytes = bytes;
+      notificationPreviewMimeType = mimeType;
+    }
   }
 
   const assetId = randomId('ast');
@@ -191,14 +317,25 @@ async function handleUploadMedia(request: Request, env: Env, familyId: string): 
     },
   });
 
+  let notificationPreviewStorageKey: string | null = null;
+  if (notificationPreviewBytes && notificationPreviewMimeType) {
+    const extension = notificationPreviewMimeType === 'image/png' ? 'png' : 'jpg';
+    notificationPreviewStorageKey = `previews/${familyId}/${assetId}/line.${extension}`;
+    await env.MEDIA_BUCKET.put(notificationPreviewStorageKey, notificationPreviewBytes, {
+      httpMetadata: { contentType: notificationPreviewMimeType },
+      customMetadata: { mediaAssetId: assetId, purpose: 'line-notification' },
+    });
+  }
+
   const uploadedAt = nowIso();
   const type = mediaTypeFromMime(mimeType);
   await env.DB.prepare(
     `INSERT INTO media_assets (
       id, family_id, uploader_user_id, type, original_filename, original_mime_type,
       original_size_bytes, original_sha256, original_storage_key, client_last_modified_at,
-      uploaded_at, processing_status, visibility
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', 'family')`,
+      notification_preview_storage_key, notification_preview_mime_type,
+      notification_preview_size_bytes, uploaded_at, processing_status, visibility
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', 'family')`,
   ).bind(
     assetId,
     familyId,
@@ -210,8 +347,22 @@ async function handleUploadMedia(request: Request, env: Env, familyId: string): 
     serverHash,
     key,
     clientLastModified,
+    notificationPreviewStorageKey,
+    notificationPreviewMimeType,
+    notificationPreviewBytes?.byteLength ?? null,
     uploadedAt,
   ).run();
+
+  const notificationTask = notifyLineGroupsForAsset(env, {
+    id: assetId,
+    familyId,
+    originalFilename: rawFilename,
+    notificationPreviewStorageKey,
+  }, user, getOrigin(request, env.APP_ORIGIN)).catch((error) => {
+    console.error('line upload notification failed', error instanceof Error ? error.message : String(error));
+  });
+  if (ctx) ctx.waitUntil(notificationTask);
+  else await notificationTask;
 
   return jsonResponse({
     ok: true,
@@ -225,6 +376,112 @@ async function handleUploadMedia(request: Request, env: Env, familyId: string): 
       uploadedAt,
     },
   }, { status: 201 });
+}
+
+function decodeUploadFilename(header: string | null): string {
+  if (!header) return 'original-file';
+  try {
+    return decodeURIComponent(header);
+  } catch {
+    throw new HttpError(400, 'invalid_file_name');
+  }
+}
+
+function assertLineNotificationPreview(bytes: Uint8Array, mimeType: string): void {
+  if (bytes.byteLength === 0 || bytes.byteLength > LINE_PREVIEW_MAX_BYTES) {
+    throw new HttpError(413, 'notification_preview_too_large');
+  }
+  const isJpeg = mimeType === 'image/jpeg'
+    && bytes.byteLength >= 4
+    && bytes[0] === 0xff
+    && bytes[1] === 0xd8
+    && bytes[bytes.byteLength - 2] === 0xff
+    && bytes[bytes.byteLength - 1] === 0xd9;
+  const pngSignature = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+  const isPng = mimeType === 'image/png'
+    && bytes.byteLength >= pngSignature.length
+    && pngSignature.every((value, index) => bytes[index] === value);
+  if (!isJpeg && !isPng) throw new HttpError(415, 'notification_preview_invalid');
+}
+
+function extractLinePreviewFromDng(bytes: Uint8Array, filename: string, mimeType: string): Uint8Array | null {
+  const isDng = mimeType === 'image/x-adobe-dng' || filename.toLowerCase().endsWith('.dng');
+  if (!isDng) return null;
+  const descriptor = findDngJpegPreview(bytes);
+  if (!descriptor || descriptor.length > LINE_PREVIEW_MAX_BYTES) return null;
+  if (descriptor.offset < 0 || descriptor.offset + descriptor.length > bytes.byteLength) return null;
+  const preview = bytes.slice(descriptor.offset, descriptor.offset + descriptor.length);
+  try {
+    assertLineNotificationPreview(preview, 'image/jpeg');
+    return preview;
+  } catch {
+    return null;
+  }
+}
+
+async function notifyLineGroupsForAsset(
+  env: Env,
+  asset: {
+    id: string;
+    familyId: string;
+    originalFilename: string;
+    notificationPreviewStorageKey: string | null;
+  },
+  uploader: Pick<AuthedUser, 'displayName'>,
+  origin: string,
+): Promise<void> {
+  const rows = await env.DB.prepare(
+    `SELECT id, line_group_id, group_name
+       FROM line_group_bindings
+      WHERE family_id = ? AND status = 'active' AND notifications_enabled = 1
+      ORDER BY created_at ASC`,
+  ).bind(asset.familyId).all<{ id: string; line_group_id: string; group_name: string }>();
+
+  await Promise.all((rows.results || []).map(async (binding) => {
+    const deliveryId = randomId('lnd');
+    const retryKey = crypto.randomUUID();
+    const createdAt = nowIso();
+    const claim = await env.DB.prepare(
+      `INSERT OR IGNORE INTO line_notification_deliveries (
+        id, media_asset_id, line_group_binding_id, status, retry_key, created_at
+      ) VALUES (?, ?, ?, 'pending', ?, ?)`,
+    ).bind(deliveryId, asset.id, binding.id, retryKey, createdAt).run();
+    if ((claim.meta.changes ?? 0) !== 1) return;
+
+    const groupUrl = buildLiffUrl(env, origin, { groupBinding: binding.id });
+    const messages: Array<Record<string, unknown>> = [];
+    if (asset.notificationPreviewStorageKey) {
+      const previewToken = await hashSecretToken(`line-preview:${asset.id}`, env.SESSION_SECRET);
+      const previewUrl = `${origin.replace(/\/$/, '')}/api/line-preview/${encodeURIComponent(asset.id)}/${previewToken}`;
+      messages.push({
+        type: 'image',
+        originalContentUrl: previewUrl,
+        previewImageUrl: previewUrl,
+      });
+    }
+    const uploaderName = uploader.displayName?.trim() || 'メンバー';
+    messages.push({
+      type: 'text',
+      text: `${uploaderName}さんが「${asset.originalFilename}」を追加しました。\nアルバムを見る: ${groupUrl}`,
+    });
+
+    try {
+      await pushLineMessages(env, binding.line_group_id, messages, retryKey);
+      await env.DB.prepare(
+        `UPDATE line_notification_deliveries
+            SET status = 'sent', sent_at = ?, error_message = NULL
+          WHERE id = ?`,
+      ).bind(nowIso(), deliveryId).run();
+    } catch (error) {
+      const message = (error instanceof Error ? error.message : String(error)).slice(0, 500);
+      await env.DB.prepare(
+        `UPDATE line_notification_deliveries
+            SET status = 'failed', error_message = ?
+          WHERE id = ?`,
+      ).bind(message, deliveryId).run();
+      throw error;
+    }
+  }));
 }
 
 async function handleListMedia(request: Request, env: Env, familyId: string): Promise<Response> {
@@ -290,6 +547,39 @@ async function loadAuthorizedMediaAsset(request: Request, env: Env, assetId: str
   if (!asset) throw new HttpError(404, 'asset_not_found');
   await requireFamilyRole(user, asset.family_id, ['owner', 'admin', 'uploader', 'viewer']);
   return asset;
+}
+
+async function handleLineNotificationPreview(env: Env, assetId: string, token: string): Promise<Response> {
+  const expected = await hashSecretToken(`line-preview:${assetId}`, env.SESSION_SECRET);
+  if (!timingSafeEqual(expected, token)) throw new HttpError(404, 'preview_not_found');
+
+  const asset = await env.DB.prepare(
+    `SELECT notification_preview_storage_key, notification_preview_mime_type,
+            notification_preview_size_bytes
+       FROM media_assets
+      WHERE id = ?
+      LIMIT 1`,
+  ).bind(assetId).first<{
+    notification_preview_storage_key: string | null;
+    notification_preview_mime_type: string | null;
+    notification_preview_size_bytes: number | null;
+  }>();
+  if (!asset?.notification_preview_storage_key) throw new HttpError(404, 'preview_not_found');
+  if (asset.notification_preview_mime_type !== 'image/jpeg' && asset.notification_preview_mime_type !== 'image/png') {
+    throw new HttpError(404, 'preview_not_found');
+  }
+
+  const object = await env.MEDIA_BUCKET.get(asset.notification_preview_storage_key);
+  if (!object) throw new HttpError(404, 'preview_not_found');
+  return new Response(object.body, {
+    headers: {
+      'content-type': asset.notification_preview_mime_type,
+      'content-length': String(asset.notification_preview_size_bytes ?? object.size),
+      'cache-control': 'public, max-age=31536000, immutable',
+      'x-content-type-options': 'nosniff',
+      'content-security-policy': "default-src 'none'",
+    },
+  });
 }
 
 async function handleMediaPreview(request: Request, env: Env, assetId: string): Promise<Response> {
@@ -448,19 +738,227 @@ async function handleLineWebhook(request: Request, env: Env, ctx?: ExecutionCont
   const ok = await verifyLineSignature(env.LINE_MESSAGING_CHANNEL_SECRET, body, signature);
   if (!ok) return textResponse('invalid signature', { status: 401 });
 
-  const payload = JSON.parse(body) as { events?: Array<{ type: string; replyToken?: string; message?: { type?: string } }> };
+  const payload = JSON.parse(body) as { events?: LineWebhookEvent[] };
   const origin = getOrigin(request, env.APP_ORIGIN);
-  const replyTasks = (payload.events || [])
-    .filter((event) => event.replyToken)
-    .map((event) => {
-      const text = event.message?.type === 'image' || event.message?.type === 'video'
-        ? `まるのこしは原本保存のため、LINEトーク送信ではなくこちらの画面から追加してください。\n${origin}/`
-        : `まるのこしを開く:\n${origin}/`;
-      return replyLineMessage(env, event.replyToken!, text);
-    });
-  if (ctx) ctx.waitUntil(Promise.allSettled(replyTasks));
-  else await Promise.allSettled(replyTasks);
+  const eventTasks = (payload.events || []).map((event) => processLineWebhookEvent(env, event, origin));
+  const completion = Promise.allSettled(eventTasks);
+  if (ctx) ctx.waitUntil(completion);
+  else await completion;
   return jsonResponse({ ok: true });
+}
+
+async function processLineWebhookEvent(env: Env, event: LineWebhookEvent, origin: string): Promise<void> {
+  if (event.type === 'join' && event.source?.type === 'group' && event.source.groupId && event.replyToken) {
+    await handleLineGroupJoin(env, event.source.groupId, event.replyToken, origin);
+    return;
+  }
+
+  if (event.type === 'leave' && event.source?.type === 'group' && event.source.groupId) {
+    await env.DB.prepare(
+      `UPDATE line_group_bindings
+          SET status = 'left', left_at = ?, updated_at = ?
+        WHERE line_group_id = ?`,
+    ).bind(nowIso(), nowIso(), event.source.groupId).run();
+    return;
+  }
+
+  if (!event.replyToken) return;
+  let appUrl = `${origin}/`;
+  if (event.source?.type === 'group' && event.source.groupId) {
+    const binding = await env.DB.prepare(
+      `SELECT id
+         FROM line_group_bindings
+        WHERE line_group_id = ? AND status = 'active'
+        LIMIT 1`,
+    ).bind(event.source.groupId).first<{ id: string }>();
+    if (binding) appUrl = buildLiffUrl(env, origin, { groupBinding: binding.id });
+  }
+  const text = event.message?.type === 'image' || event.message?.type === 'video'
+    ? `まるのこしは原本保存のため、LINEトーク送信ではなくこちらの画面から追加してください。\n${appUrl}`
+    : `まるのこしを開く:\n${appUrl}`;
+  await replyLineMessages(env, event.replyToken, [{ type: 'text', text }]);
+}
+
+async function handleLineGroupJoin(env: Env, groupId: string, replyToken: string, origin: string): Promise<void> {
+  const existing = await env.DB.prepare(
+    `SELECT id, status
+       FROM line_group_bindings
+      WHERE line_group_id = ?
+      LIMIT 1`,
+  ).bind(groupId).first<{ id: string; status: string }>();
+
+  if (existing?.status === 'active') {
+    const groupUrl = buildLiffUrl(env, origin, { groupBinding: existing.id });
+    await replyLineMessages(env, replyToken, [{
+      type: 'text',
+      text: `このグループはすでに「まるのこし」と連携済みです。\n${groupUrl}`,
+    }]);
+    return;
+  }
+
+  const summary = await getLineGroupSummary(env, groupId);
+  const token = randomId('bind');
+  const tokenHash = await hashSecretToken(token, env.SESSION_SECRET);
+  const timestamp = nowIso();
+  await env.DB.prepare(
+    `INSERT INTO line_group_bindings (
+      id, line_group_id, group_name, group_picture_url, default_role,
+      notifications_enabled, status, bind_token_hash, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, 'viewer', 1, 'pending', ?, ?, ?)
+    ON CONFLICT(line_group_id) DO UPDATE SET
+      group_name = excluded.group_name,
+      group_picture_url = excluded.group_picture_url,
+      status = 'pending',
+      bind_token_hash = excluded.bind_token_hash,
+      left_at = NULL,
+      updated_at = excluded.updated_at`,
+  ).bind(
+    existing?.id || randomId('lgb'),
+    groupId,
+    summary.groupName,
+    summary.pictureUrl ?? null,
+    tokenHash,
+    timestamp,
+    timestamp,
+  ).run();
+
+  const setupUrl = buildLiffUrl(env, origin, { groupBind: token });
+  await replyLineMessages(env, replyToken, [{
+    type: 'text',
+    text: `「${summary.groupName}」を招待してくれてありがとうございます。\n家族アルバムと権限を設定してください。\n${setupUrl}`,
+  }]);
+}
+
+async function getLineGroupSummary(env: Env, groupId: string): Promise<LineGroupSummary> {
+  const res = await fetch(`https://api.line.me/v2/bot/group/${encodeURIComponent(groupId)}/summary`, {
+    headers: { authorization: `Bearer ${env.LINE_MESSAGING_CHANNEL_ACCESS_TOKEN}` },
+  });
+  const data = await res.json().catch(() => null) as LineGroupSummary | null;
+  if (!res.ok || !data?.groupName) throw new Error(`line_group_summary_failed:${res.status}`);
+  return data;
+}
+
+async function loadActiveLineGroupBinding(env: Env, bindingId: string): Promise<ActiveLineGroupBinding | null> {
+  return env.DB.prepare(
+    `SELECT lgb.id, lgb.line_group_id, lgb.family_id, lgb.default_role,
+            lgb.group_name, f.name AS family_name
+       FROM line_group_bindings lgb
+       JOIN families f ON f.id = lgb.family_id
+      WHERE lgb.id = ? AND lgb.status = 'active'
+      LIMIT 1`,
+  ).bind(bindingId).first<ActiveLineGroupBinding>();
+}
+
+async function verifyLineGroupMember(env: Env, groupId: string, lineUserId: string): Promise<void> {
+  const res = await fetch(
+    `https://api.line.me/v2/bot/group/${encodeURIComponent(groupId)}/member/${encodeURIComponent(lineUserId)}`,
+    { headers: { authorization: `Bearer ${env.LINE_MESSAGING_CHANNEL_ACCESS_TOKEN}` } },
+  );
+  if (res.status === 404) throw new HttpError(403, 'line_group_membership_required');
+  if (!res.ok) throw new HttpError(502, 'line_group_membership_check_failed');
+}
+
+function buildLiffUrl(env: Env, origin: string, params: Record<string, string>): string {
+  const base = env.LINE_LIFF_ID
+    ? `https://liff.line.me/${encodeURIComponent(env.LINE_LIFF_ID)}`
+    : `${origin.replace(/\/$/, '')}/`;
+  const url = new URL(base);
+  for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
+  return url.toString();
+}
+
+async function handlePendingLineGroup(request: Request, env: Env, token: string): Promise<Response> {
+  const user = await requireUser(request, env);
+  const tokenHash = await hashSecretToken(token, env.SESSION_SECRET);
+  const binding = await env.DB.prepare(
+    `SELECT id, group_name, group_picture_url
+       FROM line_group_bindings
+      WHERE bind_token_hash = ? AND status = 'pending'
+      LIMIT 1`,
+  ).bind(tokenHash).first<{ id: string; group_name: string; group_picture_url: string | null }>();
+  if (!binding) throw new HttpError(404, 'group_binding_not_found');
+
+  const availableFamilies = user.families.filter((family) => family.role === 'owner' || family.role === 'admin');
+  if (availableFamilies.length === 0) throw new HttpError(403, 'family_admin_required');
+  return jsonResponse({
+    group: { id: binding.id, name: binding.group_name, pictureUrl: binding.group_picture_url },
+    families: availableFamilies,
+  });
+}
+
+async function handleBindLineGroup(request: Request, env: Env): Promise<Response> {
+  const body = await request.json().catch(() => null) as {
+    token?: string;
+    familyId?: string;
+    role?: string;
+    notificationsEnabled?: boolean;
+  } | null;
+  if (!body?.token || !body.familyId) throw new HttpError(400, 'group_binding_fields_required');
+  if (body.role !== 'viewer' && body.role !== 'uploader') throw new HttpError(400, 'invalid_group_role');
+
+  const user = await requireUser(request, env);
+  const family = user.families.find((item) => item.id === body.familyId);
+  if (!family || (family.role !== 'owner' && family.role !== 'admin')) {
+    throw new HttpError(403, 'family_admin_required');
+  }
+
+  const tokenHash = await hashSecretToken(body.token, env.SESSION_SECRET);
+  const binding = await env.DB.prepare(
+    `SELECT id, line_group_id, group_name, group_picture_url, status
+       FROM line_group_bindings
+      WHERE bind_token_hash = ? AND status = 'pending'
+      LIMIT 1`,
+  ).bind(tokenHash).first<{
+    id: string;
+    line_group_id: string;
+    group_name: string;
+    group_picture_url: string | null;
+    status: string;
+  }>();
+  if (!binding) throw new HttpError(404, 'group_binding_not_found');
+
+  const lineIdentity = await env.DB.prepare(
+    'SELECT line_user_id FROM users WHERE id = ? LIMIT 1',
+  ).bind(user.id).first<{ line_user_id: string }>();
+  if (!lineIdentity?.line_user_id) throw new HttpError(403, 'line_group_membership_required');
+  await verifyLineGroupMember(env, binding.line_group_id, lineIdentity.line_user_id);
+
+  const updatedAt = nowIso();
+  const update = await env.DB.prepare(
+    `UPDATE line_group_bindings
+        SET family_id = ?, default_role = ?, notifications_enabled = ?,
+            status = 'active', bind_token_hash = NULL, bound_by_user_id = ?,
+            left_at = NULL, updated_at = ?
+      WHERE id = ? AND status = 'pending'`,
+  ).bind(
+    body.familyId,
+    body.role,
+    body.notificationsEnabled === false ? 0 : 1,
+    user.id,
+    updatedAt,
+    binding.id,
+  ).run();
+  if ((update.meta.changes ?? 0) !== 1) throw new HttpError(409, 'group_binding_already_used');
+
+  const origin = getOrigin(request, env.APP_ORIGIN);
+  const groupUrl = buildLiffUrl(env, origin, { groupBinding: binding.id });
+  let confirmationSent = true;
+  try {
+    await pushLineMessages(env, binding.line_group_id, [{
+      type: 'text',
+      text: `「${binding.group_name}」を家族アルバムに連携しました。\n権限: ${body.role === 'uploader' ? '閲覧・投稿' : '閲覧のみ'}\n${groupUrl}`,
+    }]);
+  } catch (error) {
+    confirmationSent = false;
+    console.error('line group confirmation failed', error instanceof Error ? error.message : String(error));
+  }
+
+  return jsonResponse({
+    ok: true,
+    group: { id: binding.id, name: binding.group_name, role: body.role },
+    groupUrl,
+    confirmationSent,
+  });
 }
 
 async function handleLineBotInfo(env: Env): Promise<Response> {
@@ -491,7 +989,7 @@ async function verifyLineIdToken(idToken: string, clientId: string): Promise<Lin
   return data;
 }
 
-async function upsertLineUser(env: Env, profile: LineVerifyResponse): Promise<Omit<AuthedUser, 'families'>> {
+async function upsertLineUser(env: Env, profile: LineVerifyResponse): Promise<Omit<AuthedUser, 'families' | 'groupBindingId'>> {
   const now = nowIso();
   const existing = await env.DB.prepare(
     'SELECT id, display_name, picture_url FROM users WHERE line_user_id = ?',
@@ -524,7 +1022,7 @@ async function ensureDefaultFamily(env: Env, userId: string): Promise<FamilySumm
   return listFamilies(env, userId);
 }
 
-async function listFamilies(env: Env, userId: string): Promise<FamilySummary[]> {
+async function listFamilies(env: Env, userId: string, groupBindingId?: string | null): Promise<FamilySummary[]> {
   const rows = await env.DB.prepare(
     `SELECT f.id, f.name, fm.role
        FROM family_members fm
@@ -532,7 +1030,20 @@ async function listFamilies(env: Env, userId: string): Promise<FamilySummary[]> 
       WHERE fm.user_id = ? AND fm.revoked_at IS NULL
       ORDER BY fm.joined_at ASC`,
   ).bind(userId).all<{ id: string; name: string; role: FamilySummary['role'] }>();
-  return (rows.results || []).map((row) => ({ id: row.id, name: row.name, role: row.role }));
+  const direct = (rows.results || []).map((row) => ({ id: row.id, name: row.name, role: row.role }));
+  if (!groupBindingId) return direct;
+
+  const binding = await loadActiveLineGroupBinding(env, groupBindingId);
+  if (!binding) return direct;
+  const directMatch = direct.find((family) => family.id === binding.family_id);
+  const groupFamily: FamilySummary = {
+    id: binding.family_id,
+    name: binding.family_name,
+    role: directMatch && roleRank(directMatch.role) > roleRank(binding.default_role)
+      ? directMatch.role
+      : binding.default_role,
+  };
+  return [groupFamily, ...direct.filter((family) => family.id !== binding.family_id)];
 }
 
 async function requireUser(request: Request, env: Env): Promise<AuthedUser> {
@@ -540,20 +1051,31 @@ async function requireUser(request: Request, env: Env): Promise<AuthedUser> {
   if (!token) throw new HttpError(401, 'not_authenticated');
   const tokenHash = await hashSecretToken(token, env.SESSION_SECRET);
   const row = await env.DB.prepare(
-    `SELECT u.id, u.display_name, u.picture_url, s.expires_at
+    `SELECT u.id, u.display_name, u.picture_url, s.expires_at, s.line_group_binding_id
        FROM sessions s
        JOIN users u ON u.id = s.user_id
       WHERE s.token_hash = ?
       LIMIT 1`,
-  ).bind(tokenHash).first<{ id: string; display_name: string | null; picture_url: string | null; expires_at: string }>();
+  ).bind(tokenHash).first<{
+    id: string;
+    display_name: string | null;
+    picture_url: string | null;
+    expires_at: string;
+    line_group_binding_id: string | null;
+  }>();
   if (!row) throw new HttpError(401, 'not_authenticated');
   if (Date.parse(row.expires_at) < Date.now()) throw new HttpError(401, 'session_expired');
   return {
     id: row.id,
     displayName: row.display_name,
     pictureUrl: row.picture_url,
-    families: await listFamilies(env, row.id),
+    groupBindingId: row.line_group_binding_id,
+    families: await listFamilies(env, row.id, row.line_group_binding_id),
   };
+}
+
+function roleRank(role: FamilySummary['role']): number {
+  return { viewer: 0, uploader: 1, admin: 2, owner: 3 }[role];
 }
 
 async function requireFamilyRole(user: AuthedUser, familyId: string, allowed: FamilySummary['role'][]): Promise<void> {
@@ -575,15 +1097,38 @@ async function hashSecretToken(token: string, secret: string): Promise<string> {
   return sha256Hex(`${secret}:${token}`);
 }
 
-async function replyLineMessage(env: Env, replyToken: string, text: string): Promise<void> {
-  await fetch('https://api.line.me/v2/bot/message/reply', {
+async function pushLineMessages(
+  env: Env,
+  recipientId: string,
+  messages: Array<Record<string, unknown>>,
+  retryKey = crypto.randomUUID(),
+): Promise<void> {
+  const res = await fetch('https://api.line.me/v2/bot/message/push', {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${env.LINE_MESSAGING_CHANNEL_ACCESS_TOKEN}`,
+      'content-type': 'application/json',
+      'x-line-retry-key': retryKey,
+    },
+    body: JSON.stringify({ to: recipientId, messages }),
+  });
+  if (!res.ok && res.status !== 409) throw new Error(`line_push_failed:${res.status}`);
+}
+
+async function replyLineMessages(
+  env: Env,
+  replyToken: string,
+  messages: Array<Record<string, unknown>>,
+): Promise<void> {
+  const res = await fetch('https://api.line.me/v2/bot/message/reply', {
     method: 'POST',
     headers: {
       authorization: `Bearer ${env.LINE_MESSAGING_CHANNEL_ACCESS_TOKEN}`,
       'content-type': 'application/json',
     },
-    body: JSON.stringify({ replyToken, messages: [{ type: 'text', text }] }),
+    body: JSON.stringify({ replyToken, messages }),
   });
+  if (!res.ok) throw new Error(`line_reply_failed:${res.status}`);
 }
 
 class HttpError extends Error {
