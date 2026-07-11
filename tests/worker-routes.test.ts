@@ -43,4 +43,29 @@ describe('public Worker routes', () => {
     expect(html).toContain('原本');
     expect(html).toContain('type="file"');
   });
+
+  it('serves a Bootstrap 2-inspired layout with responsive local styles', async () => {
+    const res = await worker.fetch(new Request('https://mrnks.2-38.com/'), fakeEnv());
+    const html = await res.text();
+
+    expect(html).toContain('class="navbar navbar-static-top"');
+    expect(html).toContain('class="container"');
+    expect(html).toContain('class="hero-unit"');
+    expect(html).toContain('class="row-fluid setup-grid"');
+    expect(html).toContain('class="span6"');
+    expect(html).toContain('class="well status-well"');
+    expect(html).toContain('class="btn btn-primary"');
+    expect(html).toContain('class="label label-success"');
+    expect(html).toContain('@media (max-width: 767px)');
+    expect(html).not.toContain('bootstrap.min.css');
+  });
+
+  it('serves a syntactically valid inline module', async () => {
+    const res = await worker.fetch(new Request('https://mrnks.2-38.com/'), fakeEnv());
+    const html = await res.text();
+    const inlineModule = html.match(/<script type="module">([\s\S]*?)<\/script>/)?.[1];
+
+    expect(inlineModule).toBeTruthy();
+    expect(() => new Function(inlineModule!)).not.toThrow();
+  });
 });
