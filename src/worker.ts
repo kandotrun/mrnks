@@ -4,11 +4,14 @@ import {
   clearSessionCookie,
   contentDispositionAttachment,
   createSessionCookie,
+  findDngJpegPreview,
   getOrigin,
   htmlResponse,
   jsonResponse,
+  normalizeMediaMimeType,
   nowIso,
   parseCookieHeader,
+  parseSingleByteRange,
   randomId,
   sha256Hex,
   textResponse,
@@ -51,6 +54,27 @@ interface LineVerifyResponse {
 
 const SESSION_TTL_SECONDS = 60 * 60 * 24 * 30;
 const DOWNLOAD_TTL_SECONDS = 60 * 10;
+const DNG_HEADER_READ_BYTES = 1024 * 1024;
+const MEDIA_PAGE_SIZE = 60;
+const MAX_MEDIA_OFFSET = 1_000_000;
+const BROWSER_IMAGE_MIME_TYPES = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/gif',
+  'image/webp',
+  'image/avif',
+  'image/bmp',
+]);
+
+interface StoredMediaAsset {
+  id: string;
+  family_id: string;
+  type: string;
+  original_filename: string;
+  original_mime_type: string;
+  original_size_bytes: number;
+  original_storage_key: string;
+}
 
 const worker = {
   async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
@@ -84,6 +108,12 @@ async function route(request: Request, env: Env, ctx?: ExecutionContext): Promis
   const familyMediaMatch = path.match(/^\/api\/families\/([^/]+)\/media$/);
   if (familyMediaMatch && request.method === 'GET') return handleListMedia(request, env, decodeURIComponent(familyMediaMatch[1]));
   if (familyMediaMatch && request.method === 'PUT') return handleUploadMedia(request, env, decodeURIComponent(familyMediaMatch[1]));
+
+  const previewMatch = path.match(/^\/api\/media\/([^/]+)\/preview$/);
+  if (previewMatch && request.method === 'GET') return handleMediaPreview(request, env, decodeURIComponent(previewMatch[1]));
+
+  const contentMatch = path.match(/^\/api\/media\/([^/]+)\/content$/);
+  if (contentMatch && request.method === 'GET') return handleMediaContent(request, env, decodeURIComponent(contentMatch[1]));
 
   const downloadUrlMatch = path.match(/^\/api\/media\/([^/]+)\/download-url$/);
   if (downloadUrlMatch && request.method === 'POST') return handleCreateDownloadUrl(request, env, decodeURIComponent(downloadUrlMatch[1]));
@@ -140,7 +170,7 @@ async function handleUploadMedia(request: Request, env: Env, familyId: string): 
   await requireFamilyRole(user, familyId, ['owner', 'admin', 'uploader']);
 
   const rawFilename = decodeURIComponent(request.headers.get('x-file-name') || 'original-file');
-  const mimeType = request.headers.get('content-type') || 'application/octet-stream';
+  const mimeType = normalizeMediaMimeType(rawFilename, request.headers.get('content-type'));
   const clientHash = request.headers.get('x-client-sha256')?.toLowerCase() || null;
   const clientLastModified = request.headers.get('x-client-last-modified') || null;
   const bytes = new Uint8Array(await request.arrayBuffer());
@@ -200,36 +230,164 @@ async function handleUploadMedia(request: Request, env: Env, familyId: string): 
 async function handleListMedia(request: Request, env: Env, familyId: string): Promise<Response> {
   const user = await requireUser(request, env);
   await requireFamilyRole(user, familyId, ['owner', 'admin', 'uploader', 'viewer']);
+  const requestedOffset = Number.parseInt(new URL(request.url).searchParams.get('offset') || '0', 10);
+  const offset = Number.isFinite(requestedOffset)
+    ? Math.min(Math.max(requestedOffset, 0), MAX_MEDIA_OFFSET)
+    : 0;
   const rows = await env.DB.prepare(
     `SELECT id, type, original_filename, original_mime_type, original_size_bytes, original_sha256,
-            uploaded_at, processing_status
+            captured_at, client_last_modified_at, uploaded_at, processing_status,
+            COUNT(*) OVER () AS total_count
        FROM media_assets
       WHERE family_id = ?
-      ORDER BY uploaded_at DESC
-      LIMIT 200`,
-  ).bind(familyId).all<{
+      ORDER BY COALESCE(captured_at, client_last_modified_at, uploaded_at) DESC, uploaded_at DESC, id DESC
+      LIMIT ? OFFSET ?`,
+  ).bind(familyId, MEDIA_PAGE_SIZE + 1, offset).all<{
     id: string;
     type: string;
     original_filename: string;
     original_mime_type: string;
     original_size_bytes: number;
     original_sha256: string;
+    captured_at: string | null;
+    client_last_modified_at: string | null;
     uploaded_at: string;
     processing_status: string;
+    total_count: number;
   }>();
 
+  const resultRows = rows.results || [];
+  const pageRows = resultRows.slice(0, MEDIA_PAGE_SIZE);
   return jsonResponse({
-    assets: (rows.results || []).map((row) => ({
+    assets: pageRows.map((row) => ({
       id: row.id,
       type: row.type,
       originalFilename: row.original_filename,
       mimeType: row.original_mime_type,
       sizeBytes: row.original_size_bytes,
       sha256: row.original_sha256,
+      capturedAt: row.captured_at,
+      clientLastModifiedAt: row.client_last_modified_at,
       uploadedAt: row.uploaded_at,
       processingStatus: row.processing_status,
+      previewUrl: `/api/media/${encodeURIComponent(row.id)}/preview`,
+      contentUrl: `/api/media/${encodeURIComponent(row.id)}/content`,
     })),
+    totalCount: resultRows[0]?.total_count ?? 0,
+    hasMore: resultRows.length > MEDIA_PAGE_SIZE,
+    nextOffset: offset + pageRows.length,
   });
+}
+
+async function loadAuthorizedMediaAsset(request: Request, env: Env, assetId: string): Promise<StoredMediaAsset> {
+  const user = await requireUser(request, env);
+  const asset = await env.DB.prepare(
+    `SELECT id, family_id, type, original_filename, original_mime_type, original_size_bytes, original_storage_key
+       FROM media_assets
+      WHERE id = ?
+      LIMIT 1`,
+  ).bind(assetId).first<StoredMediaAsset>();
+  if (!asset) throw new HttpError(404, 'asset_not_found');
+  await requireFamilyRole(user, asset.family_id, ['owner', 'admin', 'uploader', 'viewer']);
+  return asset;
+}
+
+async function handleMediaPreview(request: Request, env: Env, assetId: string): Promise<Response> {
+  const asset = await loadAuthorizedMediaAsset(request, env, assetId);
+  const isDng = asset.original_mime_type === 'image/x-adobe-dng' || asset.original_filename.toLowerCase().endsWith('.dng');
+
+  if (isDng) {
+    const headerObject = await env.MEDIA_BUCKET.get(asset.original_storage_key, {
+      range: { offset: 0, length: Math.min(DNG_HEADER_READ_BYTES, asset.original_size_bytes) },
+    });
+    if (!headerObject) throw new HttpError(404, 'original_object_not_found');
+    const descriptor = findDngJpegPreview(await headerObject.bytes());
+    if (!descriptor || descriptor.offset + descriptor.length > asset.original_size_bytes) {
+      throw new HttpError(415, 'dng_preview_unavailable');
+    }
+
+    const previewObject = await env.MEDIA_BUCKET.get(asset.original_storage_key, {
+      range: { offset: descriptor.offset, length: descriptor.length },
+    });
+    if (!previewObject) throw new HttpError(404, 'original_object_not_found');
+    const previewBytes = await previewObject.bytes();
+    if (previewBytes.byteLength < 2 || previewBytes[0] !== 0xff || previewBytes[1] !== 0xd8) {
+      throw new HttpError(415, 'dng_preview_invalid');
+    }
+
+    const responseBytes = new Uint8Array(previewBytes.byteLength);
+    responseBytes.set(previewBytes);
+    return new Response(responseBytes.buffer, {
+      headers: {
+        'content-type': 'image/jpeg',
+        'content-length': String(previewBytes.byteLength),
+        'cache-control': 'private, max-age=86400',
+        'vary': 'Cookie',
+        'x-content-type-options': 'nosniff',
+        'x-mrnks-preview-source': 'embedded-dng',
+      },
+    });
+  }
+
+  if (!BROWSER_IMAGE_MIME_TYPES.has(asset.original_mime_type)) {
+    throw new HttpError(415, 'preview_unavailable');
+  }
+  const object = await env.MEDIA_BUCKET.get(asset.original_storage_key);
+  if (!object) throw new HttpError(404, 'original_object_not_found');
+  return new Response(object.body, {
+    headers: {
+      'content-type': asset.original_mime_type,
+      'content-length': String(asset.original_size_bytes),
+      'cache-control': 'private, max-age=86400',
+      'vary': 'Cookie',
+      'x-content-type-options': 'nosniff',
+      'x-mrnks-preview-source': 'original-image',
+    },
+  });
+}
+
+async function handleMediaContent(request: Request, env: Env, assetId: string): Promise<Response> {
+  const asset = await loadAuthorizedMediaAsset(request, env, assetId);
+  const requestedRange = parseSingleByteRange(request.headers.get('range'), asset.original_size_bytes);
+  if (requestedRange.kind === 'unsatisfiable') {
+    return new Response(null, {
+      status: 416,
+      headers: {
+        'content-range': `bytes */${asset.original_size_bytes}`,
+        'accept-ranges': 'bytes',
+        'cache-control': 'private, no-store',
+        'vary': 'Cookie',
+        'x-content-type-options': 'nosniff',
+      },
+    });
+  }
+
+  const object = requestedRange.kind === 'partial'
+    ? await env.MEDIA_BUCKET.get(asset.original_storage_key, {
+      range: { offset: requestedRange.offset, length: requestedRange.length },
+    })
+    : await env.MEDIA_BUCKET.get(asset.original_storage_key);
+  if (!object) throw new HttpError(404, 'original_object_not_found');
+
+  const inlineVideo = asset.type === 'video' && /^video\/[a-z0-9.+-]+$/i.test(asset.original_mime_type);
+  const headers = new Headers({
+    'content-type': inlineVideo ? asset.original_mime_type : 'application/octet-stream',
+    'cache-control': 'private, max-age=3600',
+    'vary': 'Cookie',
+    'x-content-type-options': 'nosniff',
+    'accept-ranges': 'bytes',
+  });
+  if (!inlineVideo) headers.set('content-disposition', contentDispositionAttachment(asset.original_filename));
+
+  if (requestedRange.kind === 'partial') {
+    const end = requestedRange.offset + requestedRange.length - 1;
+    headers.set('content-range', `bytes ${requestedRange.offset}-${end}/${asset.original_size_bytes}`);
+    headers.set('content-length', String(requestedRange.length));
+    return new Response(object.body, { status: 206, headers });
+  }
+
+  headers.set('content-length', String(asset.original_size_bytes));
+  return new Response(object.body, { status: 200, headers });
 }
 
 async function handleCreateDownloadUrl(request: Request, env: Env, assetId: string): Promise<Response> {

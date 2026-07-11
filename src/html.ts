@@ -230,7 +230,7 @@ export function renderAppHtml(): string {
       cursor: pointer;
     }
     .user-state { margin: 12px 0 0; }
-    .status-well, .timeline-well { background-color: var(--surface); }
+    .status-well, .gallery-well { background-color: var(--surface); }
     .status {
       min-height: 52px;
       margin-top: 10px;
@@ -254,28 +254,211 @@ export function renderAppHtml(): string {
       gap: 12px;
     }
     .section-heading h2 { margin-bottom: 0; }
-    .media {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+    .album-heading-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .album-count {
+      min-width: 24px;
+      padding: 2px 8px;
+      border-radius: 10px;
+      color: #ffffff;
+      background: #666666;
+      font-size: 12px;
+      font-weight: 700;
+      line-height: 18px;
+      text-align: center;
+    }
+    .gallery-days { display: grid; gap: 24px; }
+    .gallery-more { margin-top: 18px; text-align: center; }
+    .gallery-more .btn[hidden] { display: none; }
+    .gallery-day-heading {
+      display: flex;
+      margin: 0 0 8px;
+      padding-bottom: 6px;
+      border-bottom: 1px solid #e5e5e5;
+      align-items: baseline;
+      justify-content: space-between;
       gap: 12px;
     }
-    .asset {
-      padding: 12px;
-      overflow: hidden;
-      border: 1px solid #dddddd;
-      border-radius: 4px;
-      background-color: #ffffff;
-      box-shadow: 0 1px 2px rgba(0, 0, 0, .06);
+    .gallery-day-heading h3 {
+      margin: 0;
+      color: #444444;
+      font-size: 16px;
+      line-height: 22px;
     }
-    .asset strong {
+    .gallery-grid {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 6px;
+    }
+    .gallery-item {
+      position: relative;
       display: block;
-      margin-bottom: 4px;
+      width: 100%;
+      padding: 0;
       overflow: hidden;
-      color: #333333;
+      aspect-ratio: 1;
+      border: 1px solid #d8d8d8;
+      border-radius: 3px;
+      color: #ffffff;
+      background: #e9ecef;
+      cursor: pointer;
+      box-shadow: 0 1px 2px rgba(0, 0, 0, .08);
+    }
+    .gallery-item:hover, .gallery-item:focus { border-color: #0088cc; }
+    .gallery-item:focus-visible { outline: 3px solid rgba(0, 136, 204, .45); outline-offset: 2px; }
+    .gallery-thumb {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      background: #e9ecef;
+    }
+    .gallery-placeholder {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #4f5962;
+      background: #e9ecef;
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: .04em;
+    }
+    .gallery-badge {
+      position: absolute;
+      top: 6px;
+      left: 6px;
+      z-index: 1;
+      padding: 1px 5px;
+      border-radius: 3px;
+      color: #ffffff;
+      background: rgba(0, 0, 0, .72);
+      box-shadow: 0 1px 2px rgba(0, 0, 0, .25);
+      font-size: 10px;
+      font-weight: 700;
+      line-height: 16px;
+    }
+    .gallery-video-badge {
+      top: auto;
+      right: 6px;
+      bottom: 6px;
+      left: auto;
+      font-size: 15px;
+    }
+    .gallery-dialog {
+      width: min(960px, calc(100vw - 24px));
+      max-width: none;
+      height: min(820px, calc(100vh - 24px));
+      height: min(820px, calc(100dvh - 24px));
+      max-height: none;
+      padding: 0;
+      overflow: hidden;
+      border: 0;
+      border-radius: 6px;
+      color: #ffffff;
+      background: #171717;
+      box-shadow: 0 18px 60px rgba(0, 0, 0, .45);
+    }
+    .gallery-dialog::backdrop { background: rgba(0, 0, 0, .78); }
+    .gallery-dialog-shell { display: flex; height: 100%; flex-direction: column; }
+    .gallery-dialog-topbar {
+      display: flex;
+      min-height: 48px;
+      padding: 8px 10px 8px 16px;
+      border-bottom: 1px solid #333333;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .gallery-dialog-title {
+      min-width: 0;
+      margin: 0;
+      overflow: hidden;
+      font-size: 14px;
+      font-weight: 600;
+      line-height: 20px;
       text-overflow: ellipsis;
       white-space: nowrap;
     }
-    .asset-actions { margin-top: 10px; }
+    .gallery-dialog-close {
+      min-width: 44px;
+      min-height: 44px;
+      padding: 4px 9px;
+      border-color: #666666;
+      color: #ffffff;
+      background: #333333;
+      background-image: none;
+      text-shadow: none;
+    }
+    .gallery-dialog-close:hover, .gallery-dialog-close:focus { color: #ffffff; background: #444444; }
+    .gallery-stage {
+      position: relative;
+      display: flex;
+      min-height: 0;
+      flex: 1;
+      align-items: center;
+      justify-content: center;
+      background: #0b0b0b;
+    }
+    .gallery-stage-media {
+      display: block;
+      max-width: 100%;
+      max-height: 100%;
+      object-fit: contain;
+    }
+    .gallery-stage-empty {
+      padding: 24px;
+      color: #bbbbbb;
+      font-size: 14px;
+      line-height: 22px;
+      text-align: center;
+    }
+    .gallery-nav {
+      position: absolute;
+      top: 50%;
+      z-index: 2;
+      width: 42px;
+      height: 54px;
+      margin-top: -27px;
+      padding: 0;
+      border: 0;
+      border-radius: 3px;
+      color: #ffffff;
+      background: rgba(0, 0, 0, .48);
+      cursor: pointer;
+      font-size: 28px;
+      line-height: 54px;
+      text-align: center;
+    }
+    .gallery-nav:hover, .gallery-nav:focus { background: rgba(0, 0, 0, .7); }
+    .gallery-nav:disabled { display: none; }
+    .gallery-nav-prev { left: 10px; }
+    .gallery-nav-next { right: 10px; }
+    .gallery-dialog-footer {
+      display: flex;
+      min-height: 68px;
+      padding: 10px 14px;
+      border-top: 1px solid #333333;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    .gallery-meta { min-width: 0; }
+    .gallery-meta-primary {
+      overflow: hidden;
+      color: #ffffff;
+      font-size: 13px;
+      line-height: 19px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .gallery-meta-secondary { color: #aaaaaa; font-size: 12px; line-height: 18px; }
+    .gallery-download { flex: 0 0 auto; }
     .alert {
       margin-bottom: 20px;
       padding: 8px 14px;
@@ -292,6 +475,9 @@ export function renderAppHtml(): string {
       font-size: 12px;
       text-align: center;
     }
+    @media (max-width: 979px) {
+      .gallery-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    }
     @media (max-width: 767px) {
       .container { width: auto; max-width: none; margin: 0 16px; }
       .navbar-text { display: none; }
@@ -303,8 +489,34 @@ export function renderAppHtml(): string {
       .row-fluid .span6 { width: 100%; margin-left: 0; }
       .setup-grid .well { height: auto; }
       .well { padding: 15px; }
+      .gallery-well { padding: 12px; }
       .section-heading { align-items: flex-start; }
-      .media { grid-template-columns: 1fr; }
+      .gallery-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 3px; }
+      .gallery-days { gap: 20px; }
+      .gallery-dialog {
+        width: 100vw;
+        height: 100vh;
+        height: 100dvh;
+        max-width: none;
+        max-height: none;
+        border-radius: 0;
+      }
+      .gallery-dialog-topbar {
+        padding-top: max(8px, env(safe-area-inset-top));
+        padding-right: max(10px, env(safe-area-inset-right));
+        padding-left: max(16px, env(safe-area-inset-left));
+      }
+      .gallery-dialog-footer {
+        min-height: 76px;
+        padding-top: 9px;
+        padding-right: max(10px, env(safe-area-inset-right));
+        padding-bottom: max(9px, env(safe-area-inset-bottom));
+        padding-left: max(10px, env(safe-area-inset-left));
+        gap: 8px;
+      }
+      .gallery-nav { width: 44px; height: 52px; margin-top: -26px; line-height: 52px; }
+      .gallery-nav-prev { left: max(4px, env(safe-area-inset-left)); }
+      .gallery-nav-next { right: max(4px, env(safe-area-inset-right)); }
     }
   </style>
 </head>
@@ -343,7 +555,7 @@ export function renderAppHtml(): string {
       <section class="well">
         <h2>2. 写真・動画を追加</h2>
         <p class="help-block">LINEトークではなく、ここから原本を選んでください。保存時にSHA-256を照合します。</p>
-        <input id="fileInput" type="file" multiple accept="image/*,video/*" aria-label="保存する写真・動画を選択" />
+        <input id="fileInput" type="file" multiple accept="image/*,video/*,.dng,.DNG" aria-label="保存する写真・動画を選択" />
         <div class="button-row">
           <button id="uploadButton" class="btn btn-primary" type="button">原本をアップロード</button>
         </div>
@@ -356,18 +568,53 @@ export function renderAppHtml(): string {
     <div id="status" class="status" role="status" aria-live="polite">起動中...</div>
   </section>
 
-  <section class="well timeline-well">
+  <section class="well gallery-well" id="album">
     <div class="section-heading">
-      <h2>タイムライン</h2>
-      <button id="loadMediaButton" class="btn btn-small" type="button">一覧を更新</button>
+      <h2>アルバム</h2>
+      <div class="album-heading-actions">
+        <span id="albumCount" class="album-count" role="status" aria-live="polite" aria-label="表示件数 0件">0</span>
+        <button id="loadMediaButton" class="btn btn-small" type="button">一覧を更新</button>
+      </div>
     </div>
-    <div id="mediaGrid" class="media"></div>
+    <div id="galleryDays" class="gallery-days"></div>
+    <div class="gallery-more">
+      <button id="loadMoreMediaButton" class="btn" type="button" hidden>さらに読み込む</button>
+    </div>
   </section>
 
   <p class="footer-note">原本ファイルは再圧縮せず、家族専用の保存領域に保管します。</p>
 </main>
+
+<dialog id="galleryDialog" class="gallery-dialog" role="dialog" aria-modal="true" aria-labelledby="galleryTitle">
+  <div class="gallery-dialog-shell">
+    <header class="gallery-dialog-topbar">
+      <h2 id="galleryTitle" class="gallery-dialog-title">プレビュー</h2>
+      <button id="galleryCloseButton" class="btn gallery-dialog-close" type="button" aria-label="プレビューを閉じる">閉じる</button>
+    </header>
+    <div id="galleryStage" class="gallery-stage">
+      <button id="galleryPrevButton" class="gallery-nav gallery-nav-prev" type="button" aria-label="前の写真">‹</button>
+      <button id="galleryNextButton" class="gallery-nav gallery-nav-next" type="button" aria-label="次の写真">›</button>
+    </div>
+    <footer class="gallery-dialog-footer">
+      <div class="gallery-meta">
+        <div id="galleryMetaPrimary" class="gallery-meta-primary"></div>
+        <div id="galleryMetaSecondary" class="gallery-meta-secondary"></div>
+      </div>
+      <button id="galleryDownloadButton" class="btn btn-primary gallery-download" type="button">原本DL</button>
+    </footer>
+  </div>
+</dialog>
 <script type="module">
-const state = { config: null, session: null, familyId: null };
+const state = {
+  config: null,
+  session: null,
+  familyId: null,
+  assets: [],
+  activeAssetId: null,
+  mediaOffset: 0,
+  totalCount: 0,
+  mediaHasMore: false,
+};
 const $ = (id) => document.getElementById(id);
 const status = (message) => { $('status').textContent = message; };
 const appendStatus = (message) => { $('status').textContent += '\\n' + message; };
@@ -461,32 +708,267 @@ async function uploadFiles() {
   await loadMedia();
 }
 
-async function loadMedia() {
+function assetDate(item) {
+  const raw = item.capturedAt || item.clientLastModifiedAt || item.uploadedAt;
+  const date = new Date(raw);
+  return Number.isNaN(date.getTime()) ? new Date(item.uploadedAt) : date;
+}
+
+function dayKey(date) {
+  const pad = (value) => String(value).padStart(2, '0');
+  return date.getFullYear() + '-' + pad(date.getMonth() + 1) + '-' + pad(date.getDate());
+}
+
+function groupAssetsByDay(assets) {
+  const groups = [];
+  const byKey = new Map();
+  for (const item of assets) {
+    const date = assetDate(item);
+    const key = dayKey(date);
+    let group = byKey.get(key);
+    if (!group) {
+      group = { key, date, items: [] };
+      byKey.set(key, group);
+      groups.push(group);
+    }
+    group.items.push(item);
+  }
+  return groups;
+}
+
+function formatGalleryDay(date) {
+  return new Intl.DateTimeFormat('ja-JP', {
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+    weekday: 'short',
+  }).format(date);
+}
+
+function formatBytes(bytes) {
+  if (bytes >= 1024 * 1024 * 1024) return (bytes / (1024 * 1024 * 1024)).toFixed(1) + 'GB';
+  if (bytes >= 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + 'MB';
+  if (bytes >= 1024) return Math.round(bytes / 1024) + 'KB';
+  return bytes + 'B';
+}
+
+function isDng(item) {
+  return item.mimeType === 'image/x-adobe-dng' || item.originalFilename.toLowerCase().endsWith('.dng');
+}
+
+function renderGallery(assets) {
+  const root = $('galleryDays');
+  root.innerHTML = '';
+  const countBadge = $('albumCount');
+  const totalCount = Math.max(assets.length, Number(state.totalCount) || 0);
+  countBadge.textContent = String(totalCount);
+  countBadge.setAttribute(
+    'aria-label',
+    '保存件数 ' + totalCount + '件' + (assets.length < totalCount ? '、' + assets.length + '件を表示中' : ''),
+  );
+  if (!assets.length) {
+    root.innerHTML = '<div class="alert alert-info">まだ写真・動画がありません。最初の原本をアップロードしてください。</div>';
+    return;
+  }
+
+  for (const group of groupAssetsByDay(assets)) {
+    const section = document.createElement('section');
+    section.className = 'gallery-day';
+    const heading = document.createElement('div');
+    heading.className = 'gallery-day-heading';
+    const title = document.createElement('h3');
+    title.textContent = formatGalleryDay(group.date);
+    const count = document.createElement('span');
+    count.className = 'muted';
+    count.textContent = group.items.length + '件';
+    heading.append(title, count);
+
+    const grid = document.createElement('div');
+    grid.className = 'gallery-grid';
+    for (const item of group.items) {
+      const button = document.createElement('button');
+      button.className = 'gallery-item';
+      button.type = 'button';
+      button.title = item.originalFilename;
+      button.setAttribute('aria-label', item.originalFilename + 'を開く');
+
+      const placeholder = document.createElement('span');
+      placeholder.className = 'gallery-placeholder';
+      placeholder.textContent = item.type === 'video' ? 'VIDEO' : isDng(item) ? 'RAW' : 'IMAGE';
+      button.appendChild(placeholder);
+
+      let media = null;
+      if (item.type === 'image' || isDng(item)) {
+        media = document.createElement('img');
+        media.src = item.previewUrl;
+        media.alt = '';
+        media.loading = 'lazy';
+        media.decoding = 'async';
+      }
+      if (media) {
+        media.className = 'gallery-thumb';
+        media.addEventListener('error', () => media.remove(), { once: true });
+        button.appendChild(media);
+      }
+
+      if (isDng(item)) {
+        const rawBadge = document.createElement('span');
+        rawBadge.className = 'gallery-badge';
+        rawBadge.textContent = 'RAW';
+        button.appendChild(rawBadge);
+      }
+      if (item.type === 'video') {
+        const videoBadge = document.createElement('span');
+        videoBadge.className = 'gallery-badge gallery-video-badge';
+        videoBadge.textContent = '▶';
+        button.appendChild(videoBadge);
+      }
+      button.addEventListener('click', () => openGalleryItem(item.id));
+      grid.appendChild(button);
+    }
+
+    section.append(heading, grid);
+    root.appendChild(section);
+  }
+}
+
+async function downloadOriginal(item) {
+  const popup = window.open('about:blank', '_blank');
+  if (popup) popup.opener = null;
+  try {
+    const result = await api('/api/media/' + encodeURIComponent(item.id) + '/download-url', { method: 'POST' });
+    if (popup) popup.location.replace(result.downloadUrl);
+    else window.location.assign(result.downloadUrl);
+  } catch (error) {
+    popup?.close();
+    throw error;
+  }
+}
+
+function clearGalleryStage() {
+  const media = $('galleryStage').querySelector('.gallery-stage-media');
+  if (media instanceof HTMLMediaElement) {
+    media.pause();
+    media.removeAttribute('src');
+    media.load();
+  }
+  media?.remove();
+}
+
+function openGalleryItem(assetId) {
+  const item = state.assets.find((asset) => asset.id === assetId);
+  if (!item) return;
+  state.activeAssetId = item.id;
+  clearGalleryStage();
+
+  let media;
+  if (item.type === 'video') {
+    media = document.createElement('video');
+    media.src = item.contentUrl;
+    media.controls = true;
+    media.autoplay = true;
+    media.playsInline = true;
+    media.preload = 'metadata';
+  } else {
+    media = document.createElement('img');
+    media.src = item.previewUrl;
+    media.alt = item.originalFilename;
+  }
+  media.className = 'gallery-stage-media';
+  media.addEventListener('error', () => {
+    clearGalleryStage();
+    const fallback = document.createElement('div');
+    fallback.className = 'gallery-stage-media gallery-stage-empty';
+    fallback.textContent = 'プレビューを表示できません。原本DLから保存できます。';
+    $('galleryStage').insertBefore(fallback, $('galleryPrevButton'));
+  }, { once: true });
+  $('galleryStage').insertBefore(media, $('galleryPrevButton'));
+
+  const index = state.assets.findIndex((asset) => asset.id === item.id);
+  $('galleryTitle').textContent = (index + 1) + ' / ' + state.assets.length;
+  $('galleryMetaPrimary').textContent = item.originalFilename;
+  $('galleryMetaSecondary').textContent = formatGalleryDay(assetDate(item)) + ' ・ ' + formatBytes(item.sizeBytes) + (isDng(item) ? ' ・ RAW' : '');
+  $('galleryPrevButton').disabled = state.assets.length < 2;
+  $('galleryNextButton').disabled = state.assets.length < 2;
+
+  const dialog = $('galleryDialog');
+  if (!dialog.open) {
+    if (typeof dialog.showModal === 'function') dialog.showModal();
+    else dialog.setAttribute('open', '');
+  }
+}
+
+function showRelativeAsset(delta) {
+  const current = state.assets.findIndex((asset) => asset.id === state.activeAssetId);
+  if (current < 0 || state.assets.length < 2) return;
+  const next = (current + delta + state.assets.length) % state.assets.length;
+  openGalleryItem(state.assets[next].id);
+}
+
+function closeGallery() {
+  const dialog = $('galleryDialog');
+  if (dialog.open && typeof dialog.close === 'function') dialog.close();
+  else dialog.removeAttribute('open');
+}
+
+async function loadMedia(reset = true) {
   await ensureSession();
   if (!state.familyId) return;
-  const data = await api('/api/families/' + encodeURIComponent(state.familyId) + '/media');
-  const grid = $('mediaGrid');
-  grid.innerHTML = '';
-  for (const item of data.assets || []) {
-    const div = document.createElement('div');
-    div.className = 'asset';
-    div.innerHTML = '<strong></strong><p class="muted"></p><span class="label label-info"></span><div class="asset-actions"><button class="btn btn-small" type="button">原本DL</button></div>';
-    div.querySelector('strong').textContent = item.originalFilename;
-    div.querySelector('p').textContent = new Date(item.uploadedAt).toLocaleString('ja-JP') + ' / ' + Math.round(item.sizeBytes / 1024) + 'KB';
-    div.querySelector('.label').textContent = item.mimeType;
-    div.querySelector('button').addEventListener('click', async () => {
-      const url = await api('/api/media/' + encodeURIComponent(item.id) + '/download-url', { method: 'POST' });
-      window.open(url.downloadUrl, '_blank', 'noopener');
-    });
-    grid.appendChild(div);
+  const loadMoreButton = $('loadMoreMediaButton');
+  loadMoreButton.disabled = true;
+  try {
+    const offset = reset ? 0 : state.mediaOffset;
+    const data = await api(
+      '/api/families/' + encodeURIComponent(state.familyId) + '/media?offset=' + encodeURIComponent(offset),
+    );
+    const incoming = data.assets || [];
+    if (reset) {
+      state.assets = incoming;
+    } else {
+      const existingIds = new Set(state.assets.map((asset) => asset.id));
+      state.assets = state.assets.concat(incoming.filter((asset) => !existingIds.has(asset.id)));
+    }
+    state.assets.sort((a, b) => assetDate(b).getTime() - assetDate(a).getTime());
+    state.mediaOffset = Number.isInteger(data.nextOffset) ? data.nextOffset : state.assets.length;
+    state.totalCount = Number.isInteger(data.totalCount) ? data.totalCount : state.assets.length;
+    state.mediaHasMore = Boolean(data.hasMore);
+    renderGallery(state.assets);
+    loadMoreButton.hidden = !state.mediaHasMore;
+  } finally {
+    loadMoreButton.disabled = false;
   }
-  if (!data.assets?.length) grid.innerHTML = '<div class="alert alert-info">まだ写真・動画がありません。最初の原本をアップロードしてください。</div>';
 }
 
 $('loginButton').addEventListener('click', () => loginWithLiff().catch((e) => status('ERROR: ' + e.message)));
 $('refreshButton').addEventListener('click', () => boot().catch((e) => status('ERROR: ' + e.message)));
 $('uploadButton').addEventListener('click', () => uploadFiles().catch((e) => status('ERROR: ' + e.message)));
-$('loadMediaButton').addEventListener('click', () => loadMedia().catch((e) => status('ERROR: ' + e.message)));
+$('loadMediaButton').addEventListener('click', () => loadMedia(true).catch((e) => status('ERROR: ' + e.message)));
+$('loadMoreMediaButton').addEventListener('click', () => loadMedia(false).catch((e) => status('ERROR: ' + e.message)));
+$('galleryCloseButton').addEventListener('click', closeGallery);
+$('galleryPrevButton').addEventListener('click', () => showRelativeAsset(-1));
+$('galleryNextButton').addEventListener('click', () => showRelativeAsset(1));
+$('galleryDownloadButton').addEventListener('click', () => {
+  const item = state.assets.find((asset) => asset.id === state.activeAssetId);
+  if (item) downloadOriginal(item).catch((e) => status('ERROR: ' + e.message));
+});
+$('galleryDialog').addEventListener('click', (event) => {
+  if (event.target === $('galleryDialog')) closeGallery();
+});
+$('galleryDialog').addEventListener('close', () => {
+  clearGalleryStage();
+  state.activeAssetId = null;
+});
+document.addEventListener('keydown', (event) => {
+  if (!$('galleryDialog').open || event.target instanceof HTMLMediaElement) return;
+  if (event.key === 'ArrowLeft') {
+    event.preventDefault();
+    showRelativeAsset(-1);
+  }
+  if (event.key === 'ArrowRight') {
+    event.preventDefault();
+    showRelativeAsset(1);
+  }
+});
 boot().catch((e) => status('ERROR: ' + e.message));
 </script>
 </body>

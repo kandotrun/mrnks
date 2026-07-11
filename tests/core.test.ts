@@ -3,7 +3,9 @@ import { describe, expect, it } from 'vitest';
 import {
   buildOriginalKey,
   createSessionCookie,
+  normalizeMediaMimeType,
   parseCookieHeader,
+  parseSingleByteRange,
   sanitizeFilename,
   sha256Hex,
   verifyLineSignature,
@@ -20,6 +22,26 @@ describe('core utilities', () => {
     expect(buildOriginalKey('fam_abc', 'ast_123', '../IMG 1.HEIC')).toBe(
       'originals/fam_abc/ast_123/IMG_1.HEIC',
     );
+  });
+
+  it('normalizes missing browser MIME types from known media extensions', () => {
+    expect(normalizeMediaMimeType('L1002970.DNG', '')).toBe('image/x-adobe-dng');
+    expect(normalizeMediaMimeType('IMG_1234.HEIC', 'application/octet-stream')).toBe('image/heic');
+    expect(normalizeMediaMimeType('clip.MOV', 'application/octet-stream')).toBe('video/quicktime');
+    expect(normalizeMediaMimeType('photo.jpg', 'image/jpeg; charset=binary')).toBe('image/jpeg');
+  });
+
+  it('parses one satisfiable HTTP bytes range and rejects malformed or multiple ranges', () => {
+    expect(parseSingleByteRange(null, 100)).toEqual({ kind: 'full' });
+    expect(parseSingleByteRange('bytes=10-19', 100)).toEqual({ kind: 'partial', offset: 10, length: 10 });
+    expect(parseSingleByteRange('bytes=90-', 100)).toEqual({ kind: 'partial', offset: 90, length: 10 });
+    expect(parseSingleByteRange('bytes=-12', 100)).toEqual({ kind: 'partial', offset: 88, length: 12 });
+    expect(parseSingleByteRange('bytes=-999', 100)).toEqual({ kind: 'partial', offset: 0, length: 100 });
+    expect(parseSingleByteRange('bytes=99-999', 100)).toEqual({ kind: 'partial', offset: 99, length: 1 });
+    expect(parseSingleByteRange('bytes=100-', 100)).toEqual({ kind: 'unsatisfiable' });
+    expect(parseSingleByteRange('bytes=20-10', 100)).toEqual({ kind: 'unsatisfiable' });
+    expect(parseSingleByteRange('bytes=abc-def', 100)).toEqual({ kind: 'unsatisfiable' });
+    expect(parseSingleByteRange('bytes=0-0,2-3', 100)).toEqual({ kind: 'unsatisfiable' });
   });
 
   it('computes SHA-256 as lowercase hex', async () => {

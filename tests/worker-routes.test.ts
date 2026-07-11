@@ -75,4 +75,23 @@ describe('public Worker routes', () => {
 
     expect(html).toContain('withLoginOnExternalBrowser: true');
   });
+
+  it('serves a date-grouped family gallery with an accessible lightbox', async () => {
+    const res = await worker.fetch(new Request('https://mrnks.2-38.com/'), fakeEnv());
+    const html = await res.text();
+
+    expect(html).toContain('id="galleryDays"');
+    expect(html).toContain('id="galleryDialog"');
+    expect(html).toContain('id="loadMoreMediaButton"');
+    expect(html).toContain('role="dialog"');
+    expect(html).toContain('groupAssetsByDay');
+    expect(html).toContain('openGalleryItem');
+    expect(html).toContain('アルバム');
+    expect(html).toContain('env(safe-area-inset-bottom)');
+    expect(html).toContain('event.target instanceof HTMLMediaElement');
+
+    const galleryRenderer = html.match(/function renderGallery\([\s\S]*?async function downloadOriginal/)?.[0] || '';
+    expect(galleryRenderer).toContain("item.type === 'image' || isDng(item)");
+    expect(galleryRenderer).not.toContain("document.createElement('video')");
+  });
 });
