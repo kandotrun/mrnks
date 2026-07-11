@@ -392,7 +392,7 @@ async function boot() {
     appendStatus('LIFF SDKを読み込めませんでした。');
     return;
   }
-  await window.liff.init({ liffId: state.config.liffId });
+  await window.liff.init({ liffId: state.config.liffId, withLoginOnExternalBrowser: true });
   appendStatus('LIFF初期化OK');
   if (!window.liff.isLoggedIn()) {
     appendStatus('LINEログインが必要です。');

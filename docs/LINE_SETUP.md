@@ -53,6 +53,7 @@ npx wrangler secret put SESSION_SECRET --config apps/api/wrangler.toml
 - LIFF endpoint URL: `https://<app-domain>/`
 - LIFF app type: Full / Tall は実機UXで決める
 - Scope: `profile openid`
+  - `liff.getIDToken()` をサーバー認証に使うため、`openid` は必須。未設定だとLINEログイン後もID tokenを取得できない
 
 ### Messaging API channel
 

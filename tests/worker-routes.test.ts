@@ -68,4 +68,11 @@ describe('public Worker routes', () => {
     expect(inlineModule).toBeTruthy();
     expect(() => new Function(inlineModule!)).not.toThrow();
   });
+
+  it('automatically starts LINE Login when LIFF opens in an external browser', async () => {
+    const res = await worker.fetch(new Request('https://mrnks.2-38.com/'), fakeEnv());
+    const html = await res.text();
+
+    expect(html).toContain('withLoginOnExternalBrowser: true');
+  });
 });
