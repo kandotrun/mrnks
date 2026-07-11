@@ -36,6 +36,7 @@ Live: https://mrnks.2-38.com/
 - タイムライン一覧
 - 短命URLによる原本ダウンロード
 - LINE webhook 署名検証と案内返信
+- LINE公式アカウントのデフォルトリッチメニューからLIFFを起動
 
 ## MVPの成功条件
 

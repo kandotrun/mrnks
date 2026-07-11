@@ -29,6 +29,8 @@ wrangler.jsonc
 coverage/
 playwright-report/
 test-results/
+__pycache__/
+*.py[cod]
 
 # Logs
 *.log

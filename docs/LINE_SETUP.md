@@ -60,9 +60,29 @@ npx wrangler secret put SESSION_SECRET --config apps/api/wrangler.toml
 - Webhook usage: Enabled
 - Auto-reply / Greeting message: MVPでは必要最低限
 - Rich menu:
-  - 写真・動画を追加 → LIFF upload route
-  - アルバムを見る → LIFF timeline route
-  - 家族を招待 → LIFF invite route
+  - 現在のMVPはメニュー全体をタップすると LIFF ルートを開く
+  - 写真追加・タイムライン・家族招待の個別ルート実装後に複数エリア化する
+
+## リッチメニューの生成・設定
+
+Messaging APIで作成するデフォルトリッチメニューを、リポジトリ内の画像とスクリプトから再現できます。
+LIFF IDとチャネルアクセストークンは環境変数または `.dev.vars` から読み込み、標準出力には表示しません。
+
+```bash
+# 2500x843 / PNG / 1MB以下の画像を生成
+python3 scripts/generate_rich_menu.py
+
+# LINEへ送る設定内容を、URIを伏せた状態で確認
+python3 scripts/setup_rich_menu.py --dry-run
+
+# リッチメニュー作成、画像アップロード、デフォルト設定、再取得検証
+python3 scripts/setup_rich_menu.py
+```
+
+画像生成には Pillow と日本語フォントが必要です。フォントを自動検出できない場合は `RICH_MENU_FONT=/path/to/font.otf` を指定します。設定スクリプトはPython標準ライブラリのみで動作します。
+同じ `mrnks-default-v1` が存在する場合は再利用するため、通常の再実行で重複作成しません。
+
+![まるのこし リッチメニュー](../assets/rich-menu.png)
 
 ## 実装時の注意
 
@@ -83,16 +103,19 @@ python3 scripts/smoke_line_bot_info.py
 
 まだスクリプトが無い場合は、一時スクリプトで `.dev.vars` を読み、`GET https://api.line.me/v2/bot/info` を呼びます。出力は HTTP status と bot名などに限定し、token値は出しません。
 
-## 未設定・手動確認が必要なもの
+## 手動確認が必要なもの
 
-- LINE Developers Console 側の Messaging API `Webhook usage` がONになっていること
-  - APIで webhook endpoint は設定・テスト可能
-  - ただし `GET /v2/bot/channel/webhook/endpoint` の `active` が `false` の場合、Console側のON操作が必要
 - 本番 Callback URL が Console 側に反映されていること
+- リッチメニューはLINEアプリのトーク画面で表示とタップ遷移を実機確認すること
 
 ## productionで設定済みのもの
 
 - LIFF endpoint URL: `https://mrnks.2-38.com/`
 - Messaging API webhook URL: `https://mrnks.2-38.com/webhook/line`
+- Messaging API webhook usage: Enabled、接続テスト `200 OK`
+- Messaging APIデフォルトリッチメニュー: `mrnks-default-v1`
+  - 画像: `2500x843` PNG
+  - メニュー全体のURI actionから設定済みLIFFを起動
+  - チャットバーを開いた状態で表示
 
-LIFF ID の実値は client config と Worker secret に設定済みですが、公開repoのドキュメントには直書きしません。
+LIFF ID、リッチメニューIDの実値は設定済みですが、公開repoのドキュメントには直書きしません。
