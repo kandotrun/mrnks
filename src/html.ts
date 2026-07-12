@@ -7,6 +7,7 @@ export function renderAppHtml(): string {
   <title>まるのこし</title>
   <meta name="description" content="家族の写真と動画を、画質ごと残すLINEアルバム" />
   <meta name="theme-color" content="#f7f8f6" />
+  <link rel="stylesheet" href="/vendor/photoswipe/photoswipe.css" />
   <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
   <style>
     :root {
@@ -927,6 +928,99 @@ export function renderAppHtml(): string {
     .trash-name { overflow: hidden; margin: 0; font-size: 13px; font-weight: 750; text-overflow: ellipsis; white-space: nowrap; }
     .trash-meta { margin: 4px 0 0; color: var(--app-muted); font-size: 11px; line-height: 1.45; }
     .trash-restore { white-space: nowrap; }
+    .pswp {
+      --pswp-bg: #070907;
+      --pswp-placeholder-bg: #151815;
+      --pswp-icon-color: #ffffff;
+      --pswp-icon-color-secondary: #101310;
+      --pswp-icon-stroke-color: rgba(0, 0, 0, .64);
+      --pswp-icon-stroke-width: 1.5px;
+      font-family: "Avenir Next", Avenir, "Hiragino Sans", "Yu Gothic", Meiryo, sans-serif;
+    }
+    .pswp__top-bar {
+      height: calc(58px + env(safe-area-inset-top));
+      padding-top: env(safe-area-inset-top);
+      padding-right: max(4px, env(safe-area-inset-right));
+      padding-left: max(4px, env(safe-area-inset-left));
+      background: linear-gradient(to bottom, rgba(0, 0, 0, .72), rgba(0, 0, 0, 0));
+    }
+    .pswp__button {
+      width: 48px;
+      height: 52px;
+      border-radius: 50%;
+    }
+    .pswp__button:focus-visible {
+      outline: 2px solid #8ed4ae;
+      outline-offset: -4px;
+    }
+    .pswp__button .pswp__icn { top: 10px; left: 8px; }
+    .pswp__counter {
+      height: 32px;
+      margin-top: 10px;
+      margin-right: auto;
+      margin-left: 14px;
+      padding: 0 10px;
+      border-radius: 16px;
+      color: #ffffff;
+      background: rgba(0, 0, 0, .28);
+      font-size: 13px;
+      font-variant-numeric: tabular-nums;
+      font-weight: 700;
+      line-height: 32px;
+      text-shadow: none;
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+    }
+    .pswp__button--trash-media { color: #ffd9d9; }
+    .pswp__button--trash-media .pswp__icn { fill: #ffd9d9; }
+    .pswp__gallery-caption {
+      position: absolute;
+      right: 0;
+      bottom: 0;
+      left: 0;
+      z-index: 10;
+      display: flex;
+      min-height: 116px;
+      padding: 58px max(22px, env(safe-area-inset-right)) max(20px, env(safe-area-inset-bottom)) max(22px, env(safe-area-inset-left));
+      align-items: flex-end;
+      color: #ffffff;
+      background: linear-gradient(to bottom, rgba(0, 0, 0, 0), rgba(0, 0, 0, .78));
+      pointer-events: none;
+    }
+    .viewer-caption-inner { min-width: 0; max-width: min(760px, calc(100vw - 44px)); }
+    .viewer-caption-name {
+      overflow: hidden;
+      margin: 0;
+      font-size: 14px;
+      font-weight: 750;
+      line-height: 1.45;
+      text-overflow: ellipsis;
+      text-shadow: 0 1px 5px rgba(0, 0, 0, .75);
+      white-space: nowrap;
+    }
+    .viewer-caption-meta {
+      margin: 4px 0 0;
+      color: rgba(255, 255, 255, .76);
+      font-size: 12px;
+      line-height: 1.45;
+      text-shadow: 0 1px 4px rgba(0, 0, 0, .8);
+    }
+    .pswp-video-shell {
+      display: grid;
+      width: 100%;
+      height: 100%;
+      place-items: center;
+      background: #070907;
+    }
+    .pswp-video {
+      display: block;
+      width: 100%;
+      height: 100%;
+      max-width: 100%;
+      max-height: 100%;
+      object-fit: contain;
+      background: #000000;
+    }
     @media (max-width: 979px) {
       .gallery-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
     }
@@ -952,6 +1046,17 @@ export function renderAppHtml(): string {
       .trash-item { grid-template-columns: 58px minmax(0, 1fr); }
       .trash-thumb-wrap { width: 58px; height: 58px; }
       .trash-restore { grid-column: 1 / -1; width: 100%; }
+      .pswp__top-bar { height: calc(54px + env(safe-area-inset-top)); }
+      .pswp__button { width: 46px; height: 48px; }
+      .pswp__button .pswp__icn { top: 8px; left: 7px; }
+      .pswp__counter { margin-top: 8px; margin-left: 8px; }
+      .pswp__gallery-caption {
+        min-height: 104px;
+        padding-top: 48px;
+        padding-right: max(16px, env(safe-area-inset-right));
+        padding-bottom: max(16px, env(safe-area-inset-bottom));
+        padding-left: max(16px, env(safe-area-inset-left));
+      }
     }
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; }
@@ -1152,6 +1257,11 @@ const state = {
   mediaHasMore: false,
 };
 const $ = (id) => document.getElementById(id);
+const previewDimensions = new Map();
+let mediaViewer = null;
+let mediaViewerPromise = null;
+let viewerDeleteRequestId = null;
+let reopenViewerAfterDeleteDialogId = null;
 let statusTimer = null;
 function setStatus(message, append = false) {
   const node = $('status');
@@ -1765,7 +1875,9 @@ function renderGallery(assets) {
       }
       if (media) {
         media.className = 'gallery-thumb';
+        media.addEventListener('load', () => rememberPreviewDimensions(item, media), { once: true });
         media.addEventListener('error', () => media.remove(), { once: true });
+        if (media.complete) rememberPreviewDimensions(item, media);
         button.appendChild(media);
       }
 
@@ -1922,7 +2034,7 @@ function setDeleteBusy(busy) {
   $('deleteMediaConfirmButton').textContent = busy ? '移動中...' : 'ゴミ箱へ移動';
 }
 
-function openDeleteMediaDialog() {
+function showDeleteMediaDialog() {
   if (!state.canUpload) return;
   const item = state.assets.find((asset) => asset.id === state.activeAssetId);
   if (!item) return;
@@ -1930,6 +2042,18 @@ function openDeleteMediaDialog() {
   setDeleteBusy(false);
   openDialog($('deleteMediaDialog'));
   window.setTimeout(() => $('deleteMediaCancelButton').focus(), 0);
+}
+
+function openDeleteMediaDialog() {
+  if (!state.canUpload) return;
+  const item = state.assets.find((asset) => asset.id === state.activeAssetId);
+  if (!item) return;
+  if (mediaViewer?.pswp) {
+    viewerDeleteRequestId = item.id;
+    mediaViewer.pswp.close();
+    return;
+  }
+  showDeleteMediaDialog();
 }
 
 function closeDeleteMediaDialog() {
@@ -1966,6 +2090,7 @@ async function trashActiveMedia() {
     renderGallery(state.assets);
     $('loadMoreMediaButton').hidden = !state.mediaHasMore;
     setDeleteBusy(false);
+    reopenViewerAfterDeleteDialogId = null;
     closeDeleteMediaDialog();
     closeGallery();
     focusAfterMediaDelete(nextFocusAssetId);
@@ -1973,6 +2098,275 @@ async function trashActiveMedia() {
   } catch (error) {
     setDeleteBusy(false);
     throw error;
+  }
+}
+
+function rememberPreviewDimensions(item, image) {
+  const width = Number(image.naturalWidth);
+  const height = Number(image.naturalHeight);
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width < 1 || height < 1) return null;
+  const dimensions = { width, height };
+  previewDimensions.set(item.id, dimensions);
+  return dimensions;
+}
+
+function fallbackPreviewDimensions(item) {
+  if (item.type === 'video') return { width: 1280, height: 720 };
+  return { width: 1600, height: 1200 };
+}
+
+async function resolvePreviewDimensions(item) {
+  const cached = previewDimensions.get(item.id);
+  if (cached) return cached;
+  if (item.type === 'video' || !item.previewUrl) return fallbackPreviewDimensions(item);
+
+  return await new Promise((resolve) => {
+    const image = new Image();
+    image.decoding = 'async';
+    image.addEventListener('load', () => {
+      resolve(rememberPreviewDimensions(item, image) || fallbackPreviewDimensions(item));
+    }, { once: true });
+    image.addEventListener('error', () => resolve(fallbackPreviewDimensions(item)), { once: true });
+    image.src = item.previewUrl;
+  });
+}
+
+function createViewerSlide(item) {
+  if (item.type === 'video') {
+    return {
+      type: 'html',
+      html: '<div class="pswp-video-shell"></div>',
+      width: 1280,
+      height: 720,
+      asset: item,
+    };
+  }
+
+  const dimensions = previewDimensions.get(item.id) || fallbackPreviewDimensions(item);
+  return {
+    src: item.previewUrl,
+    msrc: item.previewUrl,
+    width: dimensions.width,
+    height: dimensions.height,
+    alt: item.originalFilename,
+    asset: item,
+    dimensionsEstimated: !previewDimensions.has(item.id),
+  };
+}
+
+function updateViewerCaption(element, pswp) {
+  const item = pswp.currSlide?.data?.asset;
+  element.replaceChildren();
+  if (!item) return;
+
+  state.activeAssetId = item.id;
+  const inner = document.createElement('div');
+  inner.className = 'viewer-caption-inner';
+  const name = document.createElement('p');
+  name.className = 'viewer-caption-name';
+  name.textContent = item.originalFilename;
+  const meta = document.createElement('p');
+  meta.className = 'viewer-caption-meta';
+  meta.textContent = formatGalleryDay(assetDate(item))
+    + ' ・ ' + formatBytes(item.sizeBytes)
+    + (isRaw(item) ? ' ・ RAWプレビュー' : item.type === 'video' ? ' ・ 動画' : '');
+  inner.append(name, meta);
+  element.appendChild(inner);
+}
+
+function configureMediaViewer(lightbox) {
+  lightbox.on('uiRegister', () => {
+    const pswp = lightbox.pswp;
+    if (!pswp) return;
+
+    pswp.ui.registerElement({
+      name: 'gallery-caption',
+      order: 30,
+      isButton: false,
+      appendTo: 'root',
+      onInit: (element) => {
+        const update = () => updateViewerCaption(element, pswp);
+        pswp.on('change', update);
+        pswp.on('afterInit', update);
+      },
+    });
+
+    pswp.ui.registerElement({
+      name: 'download-original',
+      order: 8,
+      isButton: true,
+      title: '原本をダウンロード',
+      ariaLabel: '原本をダウンロード',
+      html: {
+        isCustomSVG: true,
+        size: 32,
+        inner: '<path d="M15 5h2v12.2l4.1-4.1 1.4 1.4L16 21l-6.5-6.5 1.4-1.4 4.1 4.1V5Zm-6 19h14v2H9v-2Z"/>',
+      },
+      onClick: (_event, _element, instance) => {
+        const item = instance.currSlide?.data?.asset;
+        if (item) downloadOriginal(item).catch((error) => status('ERROR: ' + error.message));
+      },
+    });
+
+    pswp.ui.registerElement({
+      name: 'trash-media',
+      order: 15,
+      isButton: true,
+      title: 'ゴミ箱へ移動',
+      ariaLabel: 'この写真・動画をゴミ箱へ移動',
+      html: {
+        isCustomSVG: true,
+        size: 32,
+        inner: '<path d="M12 7V5h8v2h5v2H7V7h5Zm-2 4h12l-1 15H11l-1-15Zm3 2 .6 11h4.8l.6-11h-6Z"/>',
+      },
+      onInit: (element) => { element.hidden = !state.canUpload; },
+      onClick: (_event, _element, instance) => {
+        const item = instance.currSlide?.data?.asset;
+        if (!item) return;
+        state.activeAssetId = item.id;
+        openDeleteMediaDialog();
+      },
+    });
+  });
+
+  lightbox.on('contentAppend', ({ content }) => {
+    if (content.data.asset?.type !== 'video' || !content.element) return;
+    const shell = content.element.querySelector('.pswp-video-shell');
+    if (!shell || shell.querySelector('video')) return;
+    const video = document.createElement('video');
+    video.className = 'pswp-video';
+    video.src = content.data.asset.contentUrl;
+    video.controls = true;
+    video.playsInline = true;
+    video.preload = 'metadata';
+    video.setAttribute('aria-label', content.data.asset.originalFilename);
+    if (content.data.asset.previewUrl) video.poster = content.data.asset.previewUrl;
+    shell.appendChild(video);
+  });
+
+  lightbox.on('contentActivate', ({ content }) => {
+    const item = content.data.asset;
+    if (item) state.activeAssetId = item.id;
+    if (item?.type === 'video') {
+      const video = content.element?.querySelector('video');
+      if (video instanceof HTMLVideoElement) video.play().catch(() => {});
+    }
+  });
+
+  lightbox.on('contentDeactivate', ({ content }) => {
+    const video = content.element?.querySelector('video');
+    if (video instanceof HTMLVideoElement) video.pause();
+  });
+
+  lightbox.on('contentDestroy', ({ content }) => {
+    const video = content.element?.querySelector('video');
+    if (video instanceof HTMLVideoElement) {
+      video.pause();
+      video.removeAttribute('src');
+      video.load();
+    }
+  });
+
+  lightbox.on('loadComplete', ({ content }) => {
+    const item = content.data.asset;
+    if (!item || item.type === 'video' || !content.data.dimensionsEstimated) return;
+    if (!(content.element instanceof HTMLImageElement)) return;
+    const dimensions = rememberPreviewDimensions(item, content.element);
+    if (!dimensions) return;
+
+    content.data.width = dimensions.width;
+    content.data.height = dimensions.height;
+    content.data.dimensionsEstimated = false;
+    const pswp = lightbox.pswp;
+    if (pswp) window.setTimeout(() => pswp.refreshSlideContent(content.index), 0);
+  });
+
+  lightbox.on('destroy', () => {
+    if (viewerDeleteRequestId) {
+      const assetId = viewerDeleteRequestId;
+      viewerDeleteRequestId = null;
+      state.activeAssetId = assetId;
+      reopenViewerAfterDeleteDialogId = assetId;
+      window.requestAnimationFrame(showDeleteMediaDialog);
+    } else {
+      state.activeAssetId = null;
+    }
+  });
+}
+
+async function ensureMediaViewer() {
+  if (mediaViewer) return mediaViewer;
+  if (!mediaViewerPromise) {
+    mediaViewerPromise = import('/vendor/photoswipe/photoswipe-lightbox.esm.js')
+      .then((module) => {
+        const PhotoSwipeLightbox = module.default;
+        const lightbox = new PhotoSwipeLightbox({
+          dataSource: [],
+          pswpModule: () => import('/vendor/photoswipe/photoswipe.esm.js'),
+          bgOpacity: .96,
+          spacing: .08,
+          loop: true,
+          wheelToZoom: true,
+          pinchToClose: true,
+          closeOnVerticalDrag: true,
+          tapAction: 'toggle-controls',
+          doubleTapAction: 'zoom',
+          closeTitle: '閉じる',
+          zoomTitle: '拡大・縮小',
+          arrowPrevTitle: '前の写真・動画',
+          arrowNextTitle: '次の写真・動画',
+          imageClickAction: 'zoom-or-close',
+          bgClickAction: 'close',
+          showHideAnimationType: 'fade',
+          showAnimationDuration: 180,
+          hideAnimationDuration: 160,
+          zoomAnimationDuration: 220,
+          preloaderDelay: 350,
+          indexIndicatorSep: ' / ',
+          errorMsg: 'プレビューを表示できません。原本DLから保存できます。',
+        });
+        configureMediaViewer(lightbox);
+        lightbox.init();
+        mediaViewer = lightbox;
+        return lightbox;
+      })
+      .catch((error) => {
+        mediaViewerPromise = null;
+        throw error;
+      });
+  }
+  return await mediaViewerPromise;
+}
+
+async function openModernGalleryItem(item) {
+  const index = state.assets.findIndex((asset) => asset.id === item.id);
+  if (index < 0) return;
+  if (item.type !== 'video') await resolvePreviewDimensions(item);
+
+  const dataSource = state.assets.map(createViewerSlide);
+  const viewer = await ensureMediaViewer();
+  state.activeAssetId = item.id;
+  const opened = viewer.loadAndOpen(index, dataSource);
+  if (!opened) throw new Error('PhotoSwipeを開けませんでした');
+
+  if (state.assets.length > 1) {
+    const neighborIndexes = new Set([
+      (index - 1 + state.assets.length) % state.assets.length,
+      (index + 1) % state.assets.length,
+    ]);
+    for (const neighborIndex of neighborIndexes) {
+      const neighbor = state.assets[neighborIndex];
+      if (neighbor.type === 'video' || previewDimensions.has(neighbor.id)) continue;
+      resolvePreviewDimensions(neighbor).then((dimensions) => {
+        const slide = dataSource[neighborIndex];
+        if (!slide || !slide.dimensionsEstimated) return;
+        slide.width = dimensions.width;
+        slide.height = dimensions.height;
+        slide.dimensionsEstimated = false;
+        const pswp = viewer.pswp;
+        if (pswp && pswp.options.dataSource === dataSource) pswp.refreshSlideContent(neighborIndex);
+      });
+    }
   }
 }
 
@@ -1986,7 +2380,7 @@ function clearGalleryStage() {
   media?.remove();
 }
 
-function openGalleryItem(assetId) {
+function openLegacyGalleryItem(assetId) {
   const item = state.assets.find((asset) => asset.id === assetId);
   if (!item) return;
   state.activeAssetId = item.id;
@@ -2030,14 +2424,32 @@ function openGalleryItem(assetId) {
   }
 }
 
+async function openGalleryItem(assetId) {
+  const item = state.assets.find((asset) => asset.id === assetId);
+  if (!item) return;
+  try {
+    await openModernGalleryItem(item);
+  } catch (error) {
+    console.warn('PhotoSwipe viewer unavailable', error);
+    status('プレビューを読み込めなかったため、簡易表示に切り替えました');
+    openLegacyGalleryItem(assetId);
+  }
+}
+
 function showRelativeAsset(delta) {
+  if (mediaViewer?.pswp) {
+    if (delta < 0) mediaViewer.pswp.prev();
+    else mediaViewer.pswp.next();
+    return;
+  }
   const current = state.assets.findIndex((asset) => asset.id === state.activeAssetId);
   if (current < 0 || state.assets.length < 2) return;
   const next = (current + delta + state.assets.length) % state.assets.length;
-  openGalleryItem(state.assets[next].id);
+  openLegacyGalleryItem(state.assets[next].id);
 }
 
 function closeGallery() {
+  if (mediaViewer?.pswp) mediaViewer.pswp.close();
   const dialog = $('galleryDialog');
   if (dialog.open && typeof dialog.close === 'function') dialog.close();
   else dialog.removeAttribute('open');
@@ -2123,6 +2535,12 @@ $('deleteMediaDialog').addEventListener('cancel', (event) => {
 });
 $('deleteMediaDialog').addEventListener('close', () => {
   $('deleteMediaName').textContent = '';
+  const reopenAssetId = reopenViewerAfterDeleteDialogId;
+  reopenViewerAfterDeleteDialogId = null;
+  if (reopenAssetId && state.assets.some((asset) => asset.id === reopenAssetId)) {
+    window.requestAnimationFrame(() => openGalleryItem(reopenAssetId));
+    return;
+  }
   window.requestAnimationFrame(() => {
     if ($('galleryDialog').open && !$('galleryDeleteButton').hidden) $('galleryDeleteButton').focus();
   });

@@ -135,6 +135,37 @@ describe('public Worker routes', () => {
     expect(galleryRenderer).not.toContain("document.createElement('video')");
   });
 
+  it('serves an immersive PhotoSwipe viewer for images, RAW previews, and videos', async () => {
+    const res = await worker.fetch(new Request('https://mrnks.2-38.com/'), fakeEnv());
+    const html = await res.text();
+
+    expect(html).toContain('/vendor/photoswipe/photoswipe.css');
+    expect(html).toContain("import('/vendor/photoswipe/photoswipe-lightbox.esm.js')");
+    expect(html).toContain("pswpModule: () => import('/vendor/photoswipe/photoswipe.esm.js')");
+    expect(html).not.toContain('cdn.jsdelivr.net');
+    expect(html).toContain('wheelToZoom: true');
+    expect(html).toContain('pinchToClose: true');
+    expect(html).toContain('closeOnVerticalDrag: true');
+    expect(html).toContain("tapAction: 'toggle-controls'");
+    expect(html).toContain("doubleTapAction: 'zoom'");
+    expect(html).toContain("closeTitle: '閉じる'");
+    expect(html).toContain("zoomTitle: '拡大・縮小'");
+    expect(html).toContain("arrowPrevTitle: '前の写真・動画'");
+    expect(html).toContain("arrowNextTitle: '次の写真・動画'");
+    expect(html).toContain('pswp.options.dataSource === dataSource');
+    expect(html).toContain("name: 'gallery-caption'");
+    expect(html).toContain("name: 'download-original'");
+    expect(html).toContain("name: 'trash-media'");
+    expect(html).toContain("type: 'html'");
+    expect(html).toContain('pswp-video-shell');
+    expect(html).toContain("lightbox.on('contentActivate'");
+    expect(html).toContain("lightbox.on('contentDeactivate'");
+    expect(html).toContain('rememberPreviewDimensions(item, media)');
+    expect(html).toContain('resolvePreviewDimensions');
+    expect(html).toContain('openLegacyGalleryItem');
+    expect(html).toContain('プレビューを読み込めなかったため、簡易表示に切り替えました');
+  });
+
   it('shows indefinite trash and restore controls only to editors', async () => {
     const res = await worker.fetch(new Request('https://mrnks.2-38.com/'), fakeEnv());
     const html = await res.text();

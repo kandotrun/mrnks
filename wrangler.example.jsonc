@@ -7,6 +7,9 @@
     "ENVIRONMENT": "production",
     "APP_ORIGIN": "https://mrnks.2-38.com"
   },
+  "assets": {
+    "directory": "./public"
+  },
   "routes": [
     {
       "pattern": "mrnks.2-38.com",
