@@ -94,6 +94,8 @@ const DOWNLOAD_TTL_SECONDS = 60 * 10;
 const LINE_PREVIEW_MAX_BYTES = 1_000_000;
 const MEDIA_PAGE_SIZE = 60;
 const MAX_MEDIA_OFFSET = 1_000_000;
+const MESSAGE_PAGE_SIZE = 100;
+const MESSAGE_MAX_CHARACTERS = 500;
 const NAS_UPLOAD_CHUNK_BYTES = 32 * 1024 * 1024;
 const NAS_UPLOAD_MAX_BYTES = 8 * 1024 * 1024 * 1024;
 const NAS_UPLOAD_TTL_SECONDS = 60 * 60;
@@ -147,6 +149,23 @@ interface StoredMediaAsset {
   trashed_at: string | null;
 }
 
+type GalleryMessageTarget =
+  | { targetType: 'media'; mediaId: string; day: null }
+  | { targetType: 'day'; mediaId: null; day: string };
+
+interface GalleryMessageRow {
+  id: string;
+  target_type: 'media' | 'day';
+  media_asset_id: string | null;
+  target_day: string | null;
+  body: string;
+  created_at: string;
+  author_user_id: string;
+  author_display_name: string | null;
+  author_picture_url: string | null;
+  total_count: number;
+}
+
 const worker = {
   async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
     try {
@@ -198,6 +217,14 @@ async function route(request: Request, env: Env, ctx?: ExecutionContext): Promis
   const familyMediaMatch = path.match(/^\/api\/families\/([^/]+)\/media$/);
   if (familyMediaMatch && request.method === 'GET') return handleListMedia(request, env, decodeURIComponent(familyMediaMatch[1]));
   if (familyMediaMatch && request.method === 'PUT') return handleUploadMedia(request, env, decodeURIComponent(familyMediaMatch[1]), ctx);
+
+  const familyMessagesMatch = path.match(/^\/api\/families\/([^/]+)\/messages$/);
+  if (familyMessagesMatch && request.method === 'GET') {
+    return handleListGalleryMessages(request, env, decodeURIComponent(familyMessagesMatch[1]));
+  }
+  if (familyMessagesMatch && request.method === 'POST') {
+    return handleCreateGalleryMessage(request, env, decodeURIComponent(familyMessagesMatch[1]));
+  }
 
   const familyTrashMatch = path.match(/^\/api\/families\/([^/]+)\/trash$/);
   if (familyTrashMatch && request.method === 'GET') return handleListTrash(request, env, decodeURIComponent(familyTrashMatch[1]));
@@ -851,6 +878,152 @@ async function handleListMedia(request: Request, env: Env, familyId: string): Pr
     hasMore: resultRows.length > MEDIA_PAGE_SIZE,
     nextOffset: offset + pageRows.length,
   });
+}
+
+function parseGalleryMessageTarget(input: {
+  targetType?: unknown;
+  mediaId?: unknown;
+  day?: unknown;
+}): GalleryMessageTarget {
+  const targetType = input.targetType;
+  const mediaId = typeof input.mediaId === 'string' ? input.mediaId.trim() : '';
+  const day = typeof input.day === 'string' ? input.day.trim() : '';
+  if (targetType === 'media' && mediaId && !day) {
+    return { targetType, mediaId, day: null };
+  }
+  if (targetType === 'day' && day && !mediaId) {
+    const parsed = new Date(`${day}T00:00:00.000Z`);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day)
+      || Number.isNaN(parsed.getTime())
+      || parsed.toISOString().slice(0, 10) !== day) {
+      throw new HttpError(400, 'invalid_message_day');
+    }
+    return { targetType, mediaId: null, day };
+  }
+  throw new HttpError(400, 'invalid_message_target');
+}
+
+async function requireGalleryMessageTarget(
+  env: Env,
+  familyId: string,
+  target: GalleryMessageTarget,
+): Promise<void> {
+  if (target.targetType !== 'media') return;
+  const asset = await env.DB.prepare(
+    `SELECT id
+       FROM media_assets
+      WHERE id = ? AND family_id = ? AND trashed_at IS NULL
+      LIMIT 1`,
+  ).bind(target.mediaId, familyId).first<{ id: string }>();
+  if (!asset) throw new HttpError(404, 'asset_not_found');
+}
+
+function publicGalleryMessage(row: GalleryMessageRow, currentUserId: string): Record<string, unknown> {
+  return {
+    id: row.id,
+    targetType: row.target_type,
+    mediaId: row.media_asset_id,
+    day: row.target_day,
+    body: row.body,
+    createdAt: row.created_at,
+    author: {
+      id: row.author_user_id,
+      displayName: row.author_display_name,
+      pictureUrl: row.author_picture_url,
+    },
+    isMine: row.author_user_id === currentUserId,
+  };
+}
+
+async function handleListGalleryMessages(request: Request, env: Env, familyId: string): Promise<Response> {
+  const user = await requireUser(request, env);
+  await requireFamilyRole(user, familyId, ['owner', 'admin', 'uploader', 'viewer']);
+  const search = new URL(request.url).searchParams;
+  const target = parseGalleryMessageTarget({
+    targetType: search.get('targetType'),
+    mediaId: search.get('mediaId'),
+    day: search.get('day'),
+  });
+  await requireGalleryMessageTarget(env, familyId, target);
+
+  const query = target.targetType === 'media'
+    ? env.DB.prepare(
+      `SELECT gm.id, gm.target_type, gm.media_asset_id, gm.target_day, gm.body, gm.created_at,
+              gm.author_user_id, u.display_name AS author_display_name,
+              u.picture_url AS author_picture_url, COUNT(*) OVER () AS total_count
+         FROM gallery_messages gm
+         JOIN users u ON u.id = gm.author_user_id
+        WHERE gm.family_id = ? AND gm.target_type = 'media' AND gm.media_asset_id = ?
+        ORDER BY gm.created_at DESC, gm.id DESC
+        LIMIT ?`,
+    ).bind(familyId, target.mediaId, MESSAGE_PAGE_SIZE)
+    : env.DB.prepare(
+      `SELECT gm.id, gm.target_type, gm.media_asset_id, gm.target_day, gm.body, gm.created_at,
+              gm.author_user_id, u.display_name AS author_display_name,
+              u.picture_url AS author_picture_url, COUNT(*) OVER () AS total_count
+         FROM gallery_messages gm
+         JOIN users u ON u.id = gm.author_user_id
+        WHERE gm.family_id = ? AND gm.target_type = 'day' AND gm.target_day = ?
+        ORDER BY gm.created_at DESC, gm.id DESC
+        LIMIT ?`,
+    ).bind(familyId, target.day, MESSAGE_PAGE_SIZE);
+  const rows = await query.all<GalleryMessageRow>();
+  const resultRows = rows.results || [];
+  return jsonResponse({
+    messages: resultRows.slice().reverse().map((row) => publicGalleryMessage(row, user.id)),
+    totalCount: resultRows[0]?.total_count ?? 0,
+    limit: MESSAGE_PAGE_SIZE,
+  });
+}
+
+async function handleCreateGalleryMessage(request: Request, env: Env, familyId: string): Promise<Response> {
+  const user = await requireUser(request, env);
+  await requireFamilyRole(user, familyId, ['owner', 'admin', 'uploader', 'viewer']);
+  if (!(request.headers.get('content-type') || '').toLowerCase().startsWith('application/json')) {
+    throw new HttpError(415, 'json_required');
+  }
+  const input = await request.json().catch(() => null) as {
+    targetType?: unknown;
+    mediaId?: unknown;
+    day?: unknown;
+    body?: unknown;
+  } | null;
+  if (!input) throw new HttpError(400, 'invalid_json');
+  const target = parseGalleryMessageTarget(input);
+  const body = typeof input.body === 'string' ? input.body.normalize('NFC').trim() : '';
+  if (!body) throw new HttpError(400, 'message_required');
+  if (Array.from(body).length > MESSAGE_MAX_CHARACTERS) throw new HttpError(400, 'message_too_long');
+  await requireGalleryMessageTarget(env, familyId, target);
+
+  const id = randomId('msg');
+  const createdAt = nowIso();
+  await env.DB.prepare(
+    `INSERT INTO gallery_messages (
+      id, family_id, author_user_id, target_type, media_asset_id, target_day, body, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).bind(
+    id,
+    familyId,
+    user.id,
+    target.targetType,
+    target.mediaId,
+    target.day,
+    body,
+    createdAt,
+  ).run();
+
+  return jsonResponse({
+    message: {
+      id,
+      targetType: target.targetType,
+      mediaId: target.mediaId,
+      day: target.day,
+      body,
+      createdAt,
+      author: publicUser(user),
+      isMine: true,
+    },
+  }, { status: 201 });
 }
 
 async function handleListTrash(request: Request, env: Env, familyId: string): Promise<Response> {

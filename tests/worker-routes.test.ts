@@ -166,6 +166,31 @@ describe('public Worker routes', () => {
     expect(html).toContain('プレビューを読み込めなかったため、簡易表示に切り替えました');
   });
 
+  it('lets every family member leave messages on a gallery day or individual media item', async () => {
+    const res = await worker.fetch(new Request('https://mrnks.2-38.com/'), fakeEnv());
+    const html = await res.text();
+
+    expect(html).toContain('id="messageDialog"');
+    expect(html).toContain('id="messageForm"');
+    expect(html).toContain('id="messageBody"');
+    expect(html).toContain('maxlength="500"');
+    expect(html).toContain('id="messageList"');
+    expect(html).toContain('この日にメッセージ');
+    expect(html).toContain('openDayMessages(group, messageButton)');
+    expect(html).toContain("name: 'media-messages'");
+    expect(html).toContain("ariaLabel: 'この写真・動画のメッセージを開く'");
+    expect(html).toContain('openMediaMessages(item, element)');
+    expect(html).toContain('state.messageViewer.options.trapFocus = false');
+    expect(html).toContain("event.key !== 'Escape' || !$('messageDialog').open");
+    expect(html).toContain('event.stopImmediatePropagation()');
+    expect(html).toContain('id="galleryMessageButton"');
+    expect(html).toContain("'/api/families/' + encodeURIComponent(state.familyId) + '/messages?'");
+    expect(html).toContain("'/api/families/' + encodeURIComponent(state.familyId) + '/messages'");
+    expect(html).toContain('body.textContent = message.body');
+    expect(html).toContain("author.textContent = message.author?.displayName || '家族'");
+    expect(html).toContain('state.messageReturnFocus?.focus()');
+  });
+
   it('shows indefinite trash and restore controls only to editors', async () => {
     const res = await worker.fetch(new Request('https://mrnks.2-38.com/'), fakeEnv());
     const html = await res.text();

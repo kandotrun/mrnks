@@ -751,6 +751,21 @@ export function renderAppHtml(): string {
     }
     .gallery-day-heading h3 { color: var(--app-text); font-size: 14px; font-weight: 750; }
     .gallery-day-heading .muted { color: var(--app-muted); font-size: 12px; }
+    .gallery-day-actions { display: flex; align-items: center; gap: 8px; }
+    .day-message-button {
+      min-height: 36px;
+      padding: 7px 10px;
+      border: 1px solid #d7ddd8;
+      border-radius: 10px;
+      color: var(--app-accent-strong);
+      background: #ffffff;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 750;
+      line-height: 1.2;
+      white-space: nowrap;
+    }
+    .day-message-button:hover, .day-message-button:focus-visible { border-color: #9bc6ac; background: var(--app-accent-soft); }
     .gallery-grid { grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 5px; }
     .gallery-item {
       border: 0;
@@ -928,6 +943,95 @@ export function renderAppHtml(): string {
     .trash-name { overflow: hidden; margin: 0; font-size: 13px; font-weight: 750; text-overflow: ellipsis; white-space: nowrap; }
     .trash-meta { margin: 4px 0 0; color: var(--app-muted); font-size: 11px; line-height: 1.45; }
     .trash-restore { white-space: nowrap; }
+    .message-dialog { overflow: hidden; }
+    .message-dialog .sheet-body {
+      display: flex;
+      min-height: min(620px, calc(100dvh - 48px));
+      max-height: min(760px, calc(100dvh - 24px));
+      flex-direction: column;
+    }
+    .message-context {
+      margin: -10px 0 14px;
+      padding: 10px 12px;
+      overflow: hidden;
+      border-radius: 10px;
+      color: var(--app-muted);
+      background: #f3f5f3;
+      font-size: 12px;
+      line-height: 1.5;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .message-list {
+      display: grid;
+      min-height: 0;
+      padding: 2px 2px 16px;
+      overflow-y: auto;
+      align-content: start;
+      flex: 1;
+      gap: 12px;
+      overscroll-behavior: contain;
+    }
+    .message-empty {
+      display: grid;
+      min-height: 180px;
+      padding: 28px 16px;
+      border: 1px dashed #cfd6d0;
+      border-radius: 14px;
+      place-items: center;
+      color: var(--app-muted);
+      font-size: 13px;
+      line-height: 1.7;
+      text-align: center;
+    }
+    .message-item { display: grid; grid-template-columns: 36px minmax(0, 1fr); align-items: start; gap: 10px; }
+    .message-avatar {
+      display: grid;
+      width: 36px;
+      height: 36px;
+      overflow: hidden;
+      border-radius: 50%;
+      place-items: center;
+      color: var(--app-accent-strong);
+      background: var(--app-accent-soft);
+      font-size: 13px;
+      font-weight: 800;
+    }
+    .message-avatar img { width: 100%; height: 100%; object-fit: cover; }
+    .message-copy { min-width: 0; }
+    .message-meta { display: flex; margin-bottom: 4px; align-items: baseline; gap: 7px; }
+    .message-author { margin: 0; overflow: hidden; font-size: 12px; font-weight: 780; text-overflow: ellipsis; white-space: nowrap; }
+    .message-time { color: var(--app-muted); font-size: 10px; white-space: nowrap; }
+    .message-body {
+      margin: 0;
+      padding: 10px 12px;
+      border-radius: 4px 14px 14px 14px;
+      color: var(--app-text);
+      background: #f0f3f0;
+      font-size: 14px;
+      line-height: 1.65;
+      overflow-wrap: anywhere;
+      white-space: pre-wrap;
+    }
+    .message-item[data-mine="true"] .message-body { background: var(--app-accent-soft); }
+    .message-form { padding-top: 14px; border-top: 1px solid var(--app-line); }
+    .message-input {
+      display: block;
+      width: 100%;
+      min-height: 84px;
+      padding: 12px 13px;
+      resize: vertical;
+      border: 1px solid #cbd3cc;
+      border-radius: 13px;
+      color: var(--app-text);
+      background: #ffffff;
+      font: inherit;
+      line-height: 1.55;
+    }
+    .message-input:focus { border-color: var(--app-accent); outline: 3px solid rgba(22, 131, 74, .14); }
+    .message-form-footer { display: flex; margin-top: 9px; align-items: center; justify-content: space-between; gap: 12px; }
+    .message-character-count { color: var(--app-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+    .message-submit { min-width: 96px; }
     .pswp {
       --pswp-bg: #070907;
       --pswp-placeholder-bg: #151815;
@@ -1042,6 +1146,8 @@ export function renderAppHtml(): string {
         border-radius: 22px 22px 0 0;
       }
       .sheet-body { padding-right: 18px; padding-left: 18px; }
+      .message-dialog .sheet-body { min-height: calc(100dvh - 20px); max-height: calc(100dvh - 20px); }
+      .message-list { padding-bottom: 12px; }
       .fab { right: max(18px, env(safe-area-inset-right)); }
       .trash-item { grid-template-columns: 58px minmax(0, 1fr); }
       .trash-thumb-wrap { width: 58px; height: 58px; }
@@ -1185,6 +1291,28 @@ export function renderAppHtml(): string {
   </div>
 </dialog>
 
+<dialog id="messageDialog" class="settings-dialog message-dialog" aria-modal="true" aria-labelledby="messageTitle" aria-describedby="messageContext">
+  <div class="sheet-body">
+    <header class="sheet-header">
+      <div>
+        <h2 id="messageTitle">メッセージ</h2>
+        <p>家族だけで共有されます。</p>
+      </div>
+      <button id="messageCloseButton" class="sheet-close" type="button" aria-label="メッセージを閉じる">×</button>
+    </header>
+    <p id="messageContext" class="message-context"></p>
+    <div id="messageList" class="message-list" aria-live="polite" aria-busy="false"></div>
+    <form id="messageForm" class="message-form">
+      <label class="visually-hidden" for="messageBody">メッセージ本文</label>
+      <textarea id="messageBody" class="message-input" rows="3" maxlength="500" placeholder="この思い出についてメッセージを残す"></textarea>
+      <div class="message-form-footer">
+        <span id="messageCharacterCount" class="message-character-count">0 / 500</span>
+        <button id="messageSubmitButton" class="primary-action message-submit" type="submit" disabled>送信</button>
+      </div>
+    </form>
+  </div>
+</dialog>
+
 <dialog id="galleryDialog" class="gallery-dialog" role="dialog" aria-modal="true" aria-labelledby="galleryTitle">
   <div class="gallery-dialog-shell">
     <header class="gallery-dialog-topbar">
@@ -1201,6 +1329,7 @@ export function renderAppHtml(): string {
         <div id="galleryMetaSecondary" class="gallery-meta-secondary"></div>
       </div>
       <div class="gallery-actions">
+        <button id="galleryMessageButton" class="btn" type="button">メッセージ</button>
         <button id="galleryDeleteButton" class="btn gallery-delete" type="button" hidden>ゴミ箱へ</button>
         <button id="galleryDownloadButton" class="btn btn-primary gallery-download" type="button">原本DL</button>
       </div>
@@ -1255,6 +1384,14 @@ const state = {
   mediaOffset: 0,
   totalCount: 0,
   mediaHasMore: false,
+  messageTarget: null,
+  messages: [],
+  messageLoading: false,
+  messageSubmitting: false,
+  messageReturnFocus: null,
+  messageRequestSequence: 0,
+  messageViewer: null,
+  reopenViewerAfterMessageDialogId: null,
 };
 const $ = (id) => document.getElementById(id);
 const previewDimensions = new Map();
@@ -1617,7 +1754,15 @@ async function logout() {
   state.trashAssets = [];
   state.trashOffset = 0;
   state.trashHasMore = false;
+  state.messageTarget = null;
+  state.messages = [];
+  state.messageRequestSequence += 1;
+  state.messageReturnFocus = null;
+  if (state.messageViewer?.options) state.messageViewer.options.trapFocus = true;
+  state.messageViewer = null;
+  state.reopenViewerAfterMessageDialogId = null;
   toggleUserMenu(false);
+  closeDialog($('messageDialog'));
   closeDialog($('trashDialog'));
   closeUploadDrawer(true);
   $('loginButton').disabled = !window.liff || !state.config?.liffId;
@@ -1820,6 +1965,213 @@ function isRaw(item) {
     || isRawFilename(item.originalFilename);
 }
 
+function messageTargetKey(target) {
+  if (!target) return '';
+  return target.targetType === 'media' ? 'media:' + target.mediaId : 'day:' + target.day;
+}
+
+function formatMessageTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  return new Intl.DateTimeFormat('ja-JP', {
+    month: 'numeric',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(date);
+}
+
+function renderMessages() {
+  const root = $('messageList');
+  root.replaceChildren();
+  root.setAttribute('aria-busy', String(state.messageLoading));
+  if (state.messageLoading) {
+    const loading = document.createElement('div');
+    loading.className = 'message-empty';
+    loading.textContent = 'メッセージを読み込んでいます...';
+    root.appendChild(loading);
+    return;
+  }
+  if (!state.messages.length) {
+    const empty = document.createElement('div');
+    empty.className = 'message-empty';
+    empty.textContent = 'まだメッセージはありません。最初のひとことを残せます。';
+    root.appendChild(empty);
+    return;
+  }
+
+  for (const message of state.messages) {
+    const article = document.createElement('article');
+    article.className = 'message-item';
+    article.dataset.mine = String(Boolean(message.isMine));
+
+    const avatar = document.createElement('div');
+    avatar.className = 'message-avatar';
+    const displayName = message.author?.displayName || '家族';
+    if (message.author?.pictureUrl) {
+      const image = document.createElement('img');
+      image.src = message.author.pictureUrl;
+      image.alt = '';
+      image.loading = 'lazy';
+      image.referrerPolicy = 'no-referrer';
+      image.addEventListener('error', () => {
+        avatar.replaceChildren();
+        avatar.textContent = displayName.trim().charAt(0) || '家';
+      }, { once: true });
+      avatar.appendChild(image);
+    } else {
+      avatar.textContent = displayName.trim().charAt(0) || '家';
+    }
+
+    const copy = document.createElement('div');
+    copy.className = 'message-copy';
+    const meta = document.createElement('div');
+    meta.className = 'message-meta';
+    const author = document.createElement('p');
+    author.className = 'message-author';
+    author.textContent = message.author?.displayName || '家族';
+    const time = document.createElement('time');
+    time.className = 'message-time';
+    time.dateTime = message.createdAt;
+    time.textContent = formatMessageTime(message.createdAt);
+    meta.append(author, time);
+    const body = document.createElement('p');
+    body.className = 'message-body';
+    body.textContent = message.body;
+    copy.append(meta, body);
+    article.append(avatar, copy);
+    root.appendChild(article);
+  }
+  window.requestAnimationFrame(() => { root.scrollTop = root.scrollHeight; });
+}
+
+function updateMessageComposer() {
+  const value = $('messageBody').value;
+  const length = Array.from(value).length;
+  $('messageCharacterCount').textContent = length + ' / 500';
+  $('messageSubmitButton').disabled = state.messageSubmitting || !value.trim() || length > 500;
+}
+
+function setMessageSubmitting(submitting) {
+  state.messageSubmitting = submitting;
+  $('messageDialog').setAttribute('aria-busy', String(submitting));
+  $('messageCloseButton').disabled = submitting;
+  $('messageBody').disabled = submitting;
+  $('messageSubmitButton').textContent = submitting ? '送信中...' : '送信';
+  updateMessageComposer();
+}
+
+function messageSearchParams(target) {
+  const params = new URLSearchParams({ targetType: target.targetType });
+  if (target.targetType === 'media') params.set('mediaId', target.mediaId);
+  else params.set('day', target.day);
+  return params;
+}
+
+async function loadMessages(target) {
+  const requestSequence = ++state.messageRequestSequence;
+  state.messageLoading = true;
+  renderMessages();
+  const path = '/api/families/' + encodeURIComponent(state.familyId) + '/messages?'
+    + messageSearchParams(target).toString();
+  try {
+    const data = await api(path);
+    if (requestSequence !== state.messageRequestSequence || messageTargetKey(state.messageTarget) !== messageTargetKey(target)) return;
+    state.messages = data.messages || [];
+  } finally {
+    if (requestSequence === state.messageRequestSequence && messageTargetKey(state.messageTarget) === messageTargetKey(target)) {
+      state.messageLoading = false;
+      renderMessages();
+    }
+  }
+}
+
+async function showMessageDialog(target, context, trigger) {
+  state.messageTarget = target;
+  state.messages = [];
+  state.messageReturnFocus = trigger instanceof HTMLElement ? trigger : null;
+  state.messageLoading = true;
+  $('messageTitle').textContent = target.targetType === 'media' ? '写真・動画へのメッセージ' : 'この日のメッセージ';
+  $('messageContext').textContent = context;
+  $('messageBody').value = '';
+  setMessageSubmitting(false);
+  renderMessages();
+  openDialog($('messageDialog'));
+  window.setTimeout(() => $('messageBody').focus(), 0);
+  await loadMessages(target);
+}
+
+async function openDayMessages(group, messageButton) {
+  await showMessageDialog(
+    { targetType: 'day', day: group.key },
+    formatGalleryDay(group.date),
+    messageButton,
+  );
+}
+
+async function openMediaMessages(item, element) {
+  if (mediaViewer?.pswp) {
+    state.messageViewer = mediaViewer.pswp;
+    state.messageViewer.options.trapFocus = false;
+    await showMessageDialog(
+      { targetType: 'media', mediaId: item.id },
+      item.originalFilename,
+      element,
+    );
+    return;
+  }
+  if ($('galleryDialog').open) {
+    state.reopenViewerAfterMessageDialogId = item.id;
+    closeGallery();
+    await showMessageDialog(
+      { targetType: 'media', mediaId: item.id },
+      item.originalFilename,
+      null,
+    );
+    return;
+  }
+  await showMessageDialog(
+    { targetType: 'media', mediaId: item.id },
+    item.originalFilename,
+    element,
+  );
+}
+
+function closeMessageDialog() {
+  if (state.messageSubmitting) return;
+  closeDialog($('messageDialog'));
+}
+
+async function submitMessage(event) {
+  event.preventDefault();
+  const target = state.messageTarget;
+  if (!target || !state.familyId || state.messageSubmitting) return;
+  const body = $('messageBody').value.normalize('NFC').trim();
+  if (!body || Array.from(body).length > 500) return;
+  setMessageSubmitting(true);
+  try {
+    const data = await api('/api/families/' + encodeURIComponent(state.familyId) + '/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        targetType: target.targetType,
+        mediaId: target.targetType === 'media' ? target.mediaId : undefined,
+        day: target.targetType === 'day' ? target.day : undefined,
+        body,
+      }),
+    });
+    if (messageTargetKey(state.messageTarget) === messageTargetKey(target)) {
+      state.messages.push(data.message);
+      $('messageBody').value = '';
+      renderMessages();
+      status('メッセージを残しました');
+    }
+  } finally {
+    setMessageSubmitting(false);
+    if ($('messageDialog').open) $('messageBody').focus();
+  }
+}
+
 function renderGallery(assets) {
   const root = $('galleryDays');
   root.innerHTML = '';
@@ -1848,7 +2200,18 @@ function renderGallery(assets) {
     const count = document.createElement('span');
     count.className = 'muted';
     count.textContent = group.items.length + '件';
-    heading.append(title, count);
+    const messageButton = document.createElement('button');
+    messageButton.className = 'day-message-button';
+    messageButton.type = 'button';
+    messageButton.textContent = 'この日にメッセージ';
+    messageButton.setAttribute('aria-label', formatGalleryDay(group.date) + 'のメッセージを開く');
+    messageButton.addEventListener('click', () => {
+      openDayMessages(group, messageButton).catch((error) => status('ERROR: ' + error.message));
+    });
+    const headingActions = document.createElement('div');
+    headingActions.className = 'gallery-day-actions';
+    headingActions.append(count, messageButton);
+    heading.append(title, headingActions);
 
     const grid = document.createElement('div');
     grid.className = 'gallery-grid';
@@ -2209,6 +2572,25 @@ function configureMediaViewer(lightbox) {
     });
 
     pswp.ui.registerElement({
+      name: 'media-messages',
+      order: 12,
+      isButton: true,
+      title: 'メッセージ',
+      ariaLabel: 'この写真・動画のメッセージを開く',
+      html: {
+        isCustomSVG: true,
+        size: 32,
+        inner: '<path d="M7 7h18v14H14l-6 5v-5H7V7Zm2 2v10h1v2.7l3.3-2.7H23V9H9Z"/>',
+      },
+      onInit: (element, instance) => {
+        element.addEventListener('click', () => {
+          const item = instance.currSlide?.data?.asset;
+          if (item) openMediaMessages(item, element).catch((error) => status('ERROR: ' + error.message));
+        });
+      },
+    });
+
+    pswp.ui.registerElement({
       name: 'trash-media',
       order: 15,
       isButton: true,
@@ -2517,9 +2899,59 @@ $('groupSetupPanel').addEventListener('click', (event) => {
 });
 $('loadMediaButton').addEventListener('click', () => loadMedia(true).catch((e) => status('ERROR: ' + e.message)));
 $('loadMoreMediaButton').addEventListener('click', () => loadMedia(false).catch((e) => status('ERROR: ' + e.message)));
+$('messageCloseButton').addEventListener('click', closeMessageDialog);
+$('messageBody').addEventListener('input', updateMessageComposer);
+$('messageBody').addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+    event.preventDefault();
+    $('messageForm').requestSubmit();
+  }
+});
+$('messageForm').addEventListener('submit', (event) => {
+  submitMessage(event).catch((error) => status('ERROR: ' + error.message));
+});
+$('messageDialog').addEventListener('click', (event) => {
+  if (event.target === $('messageDialog')) closeMessageDialog();
+});
+window.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape' || !$('messageDialog').open) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  closeMessageDialog();
+}, true);
+$('messageDialog').addEventListener('cancel', (event) => {
+  if (state.messageSubmitting) event.preventDefault();
+});
+$('messageDialog').addEventListener('close', () => {
+  state.messageRequestSequence += 1;
+  state.messageTarget = null;
+  state.messages = [];
+  state.messageLoading = false;
+  $('messageBody').value = '';
+  updateMessageComposer();
+  if (state.messageViewer?.options) state.messageViewer.options.trapFocus = true;
+  state.messageViewer = null;
+  const reopenAssetId = state.reopenViewerAfterMessageDialogId;
+  state.reopenViewerAfterMessageDialogId = null;
+  if (reopenAssetId && state.assets.some((asset) => asset.id === reopenAssetId)) {
+    state.messageReturnFocus = null;
+    window.requestAnimationFrame(() => {
+      openGalleryItem(reopenAssetId).catch((error) => status('ERROR: ' + error.message));
+    });
+    return;
+  }
+  window.requestAnimationFrame(() => {
+    state.messageReturnFocus?.focus();
+    state.messageReturnFocus = null;
+  });
+});
 $('galleryCloseButton').addEventListener('click', closeGallery);
 $('galleryPrevButton').addEventListener('click', () => showRelativeAsset(-1));
 $('galleryNextButton').addEventListener('click', () => showRelativeAsset(1));
+$('galleryMessageButton').addEventListener('click', () => {
+  const item = state.assets.find((asset) => asset.id === state.activeAssetId);
+  if (item) openMediaMessages(item, $('galleryMessageButton')).catch((error) => status('ERROR: ' + error.message));
+});
 $('galleryDeleteButton').addEventListener('click', openDeleteMediaDialog);
 $('galleryDownloadButton').addEventListener('click', () => {
   const item = state.assets.find((asset) => asset.id === state.activeAssetId);
