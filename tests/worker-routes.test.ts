@@ -132,5 +132,12 @@ describe('public Worker routes', () => {
     expect(html).toContain("method: 'DELETE'");
     expect(html).toContain('async function deleteActiveMedia');
     expect(html).toContain("openDialog($('deleteMediaDialog'))");
+    expect(html).toContain("$('deleteMediaCancelButton').focus()");
+    expect(html).not.toContain("$('deleteMediaConfirmButton').focus()");
+    expect(html).toContain("$('deleteMediaCancelButton').disabled = busy");
+    expect(html).toContain("if (state.deleteInProgress) event.preventDefault()");
+    expect(html).toContain('button.dataset.assetId = item.id');
+    expect(html).toContain('focusAfterMediaDelete(nextFocusAssetId)');
+    expect(html).toContain('id="albumTitle" tabindex="-1"');
   });
 });

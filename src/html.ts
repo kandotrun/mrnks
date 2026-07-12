@@ -957,7 +957,7 @@ export function renderAppHtml(): string {
     <section id="album" aria-labelledby="albumTitle">
       <div class="gallery-heading">
         <div>
-          <h1 id="albumTitle">家族アルバム</h1>
+          <h1 id="albumTitle" tabindex="-1">家族アルバム</h1>
           <p class="gallery-summary"><span id="albumCount" class="album-count" role="status" aria-live="polite" aria-label="表示件数 0件">0件</span>を保存しています</p>
         </div>
         <button id="loadMediaButton" class="quiet-action" type="button">一覧を更新</button>
@@ -1090,6 +1090,7 @@ const state = {
   pendingGroup: null,
   assets: [],
   activeAssetId: null,
+  deleteInProgress: false,
   mediaOffset: 0,
   totalCount: 0,
   mediaHasMore: false,
@@ -1578,6 +1579,7 @@ function renderGallery(assets) {
       const button = document.createElement('button');
       button.className = 'gallery-item';
       button.type = 'button';
+      button.dataset.assetId = item.id;
       button.title = item.originalFilename;
       button.setAttribute('aria-label', item.originalFilename + 'を開く');
 
@@ -1634,27 +1636,48 @@ async function downloadOriginal(item) {
   }
 }
 
+function setDeleteBusy(busy) {
+  state.deleteInProgress = busy;
+  $('deleteMediaDialog').setAttribute('aria-busy', String(busy));
+  $('deleteMediaCancelButton').disabled = busy;
+  $('deleteMediaConfirmButton').disabled = busy;
+  $('deleteMediaConfirmButton').textContent = busy ? '削除中...' : '完全に削除';
+}
+
 function openDeleteMediaDialog() {
   if (!state.canUpload) return;
   const item = state.assets.find((asset) => asset.id === state.activeAssetId);
   if (!item) return;
   $('deleteMediaName').textContent = item.originalFilename;
+  setDeleteBusy(false);
   openDialog($('deleteMediaDialog'));
-  window.setTimeout(() => $('deleteMediaConfirmButton').focus(), 0);
+  window.setTimeout(() => $('deleteMediaCancelButton').focus(), 0);
 }
 
 function closeDeleteMediaDialog() {
+  if (state.deleteInProgress) return;
   closeDialog($('deleteMediaDialog'));
+}
+
+function focusAfterMediaDelete(assetId) {
+  window.requestAnimationFrame(() => {
+    const target = assetId
+      ? [...document.querySelectorAll('.gallery-item')].find((button) => button.dataset.assetId === assetId)
+      : null;
+    if (target instanceof HTMLElement) target.focus();
+    else $('albumTitle').focus();
+  });
 }
 
 async function deleteActiveMedia() {
   if (!state.canUpload) throw new Error('削除権限がありません。');
-  const item = state.assets.find((asset) => asset.id === state.activeAssetId);
+  if (state.deleteInProgress) return;
+  const itemIndex = state.assets.findIndex((asset) => asset.id === state.activeAssetId);
+  const item = state.assets[itemIndex];
   if (!item) throw new Error('削除する写真・動画が見つかりません。');
+  const nextFocusAssetId = state.assets[itemIndex + 1]?.id || state.assets[itemIndex - 1]?.id || null;
 
-  const button = $('deleteMediaConfirmButton');
-  button.disabled = true;
-  button.textContent = '削除中...';
+  setDeleteBusy(true);
   try {
     await api('/api/media/' + encodeURIComponent(item.id), { method: 'DELETE' });
     const previousTotal = Math.max(state.assets.length, Number(state.totalCount) || 0);
@@ -1664,12 +1687,14 @@ async function deleteActiveMedia() {
     state.mediaHasMore = state.assets.length < state.totalCount;
     renderGallery(state.assets);
     $('loadMoreMediaButton').hidden = !state.mediaHasMore;
+    setDeleteBusy(false);
     closeDeleteMediaDialog();
     closeGallery();
+    focusAfterMediaDelete(nextFocusAssetId);
     status('「' + item.originalFilename + '」を削除しました');
-  } finally {
-    button.disabled = false;
-    button.textContent = '完全に削除';
+  } catch (error) {
+    setDeleteBusy(false);
+    throw error;
   }
 }
 
@@ -1808,6 +1833,9 @@ $('deleteMediaCancelButton').addEventListener('click', closeDeleteMediaDialog);
 $('deleteMediaConfirmButton').addEventListener('click', () => deleteActiveMedia().catch((e) => status('ERROR: ' + e.message)));
 $('deleteMediaDialog').addEventListener('click', (event) => {
   if (event.target === $('deleteMediaDialog')) closeDeleteMediaDialog();
+});
+$('deleteMediaDialog').addEventListener('cancel', (event) => {
+  if (state.deleteInProgress) event.preventDefault();
 });
 $('deleteMediaDialog').addEventListener('close', () => {
   $('deleteMediaName').textContent = '';

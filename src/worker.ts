@@ -111,6 +111,12 @@ interface StoredMediaAsset {
   original_storage_key: string;
 }
 
+interface MediaDeletionJob {
+  asset_id: string;
+  original_storage_key: string;
+  notification_preview_storage_key: string | null;
+}
+
 const worker = {
   async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
     try {
@@ -122,6 +128,9 @@ const worker = {
       console.error('request failed', error instanceof Error ? error.message : String(error));
       return jsonResponse({ error: 'internal_error' }, { status: 500 });
     }
+  },
+  scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): void {
+    ctx.waitUntil(processPendingMediaDeletions(env));
   },
 };
 
@@ -595,17 +604,68 @@ async function handleDeleteMedia(request: Request, env: Env, assetId: string): P
   if (!asset) throw new HttpError(404, 'asset_not_found');
   await requireFamilyRole(user, asset.family_id, ['owner', 'admin', 'uploader']);
 
-  const storageKeys = [asset.original_storage_key];
-  if (asset.notification_preview_storage_key) storageKeys.push(asset.notification_preview_storage_key);
-  await env.MEDIA_BUCKET.delete(storageKeys);
-
+  const timestamp = nowIso();
   await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO media_deletion_jobs (
+        asset_id, original_storage_key, notification_preview_storage_key,
+        attempts, last_error, created_at, updated_at
+      ) VALUES (?, ?, ?, 0, NULL, ?, ?)
+      ON CONFLICT(asset_id) DO NOTHING`,
+    ).bind(
+      asset.id,
+      asset.original_storage_key,
+      asset.notification_preview_storage_key,
+      timestamp,
+      timestamp,
+    ),
     env.DB.prepare('DELETE FROM line_notification_deliveries WHERE media_asset_id = ?').bind(asset.id),
     env.DB.prepare('DELETE FROM download_tokens WHERE media_asset_id = ?').bind(asset.id),
     env.DB.prepare('DELETE FROM media_assets WHERE id = ?').bind(asset.id),
   ]);
 
+  const storageDeleted = await processMediaDeletionJob(env, {
+    asset_id: asset.id,
+    original_storage_key: asset.original_storage_key,
+    notification_preview_storage_key: asset.notification_preview_storage_key,
+  });
+  if (!storageDeleted) {
+    return jsonResponse({ ok: true, assetId: asset.id, storagePending: true }, { status: 202 });
+  }
   return jsonResponse({ ok: true, assetId: asset.id });
+}
+
+async function processMediaDeletionJob(env: Env, job: MediaDeletionJob): Promise<boolean> {
+  const storageKeys = [job.original_storage_key];
+  if (job.notification_preview_storage_key) storageKeys.push(job.notification_preview_storage_key);
+  try {
+    await env.MEDIA_BUCKET.delete(storageKeys);
+    await env.DB.prepare('DELETE FROM media_deletion_jobs WHERE asset_id = ?').bind(job.asset_id).run();
+    return true;
+  } catch (error) {
+    const message = (error instanceof Error ? error.message : String(error)).slice(0, 500);
+    console.warn('media deletion pending', job.asset_id, message);
+    try {
+      await env.DB.prepare(
+        `UPDATE media_deletion_jobs
+            SET attempts = attempts + 1, last_error = ?, updated_at = ?
+          WHERE asset_id = ?`,
+      ).bind(message, nowIso(), job.asset_id).run();
+    } catch (updateError) {
+      console.error('failed to record media deletion retry', job.asset_id, updateError instanceof Error ? updateError.message : String(updateError));
+    }
+    return false;
+  }
+}
+
+async function processPendingMediaDeletions(env: Env): Promise<void> {
+  const jobs = await env.DB.prepare(
+    `SELECT asset_id, original_storage_key, notification_preview_storage_key
+       FROM media_deletion_jobs
+      ORDER BY created_at ASC
+      LIMIT ?`,
+  ).bind(20).all<MediaDeletionJob>();
+  await Promise.all((jobs.results ?? []).map((job) => processMediaDeletionJob(env, job)));
 }
 
 async function handleLineNotificationPreview(env: Env, assetId: string, token: string): Promise<Response> {

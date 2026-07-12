@@ -7,6 +7,9 @@
     "ENVIRONMENT": "production",
     "APP_ORIGIN": "https://mrnks.2-38.com"
   },
+  "triggers": {
+    "crons": ["*/15 * * * *"]
+  },
   "routes": [
     {
       "pattern": "mrnks.2-38.com",

@@ -427,7 +427,7 @@ multipart upload を完了し、ハッシュとサイズを確定する。
 
 #### `DELETE /api/media/:assetId`
 
-`owner` / `admin` / `uploader` が、同じ家族アルバムの原本と通知用プレビューを完全削除する。関連するダウンロードトークンと通知履歴も削除し、`viewer` は拒否する。
+`owner` / `admin` / `uploader` が、同じ家族アルバムの原本と通知用プレビューを完全削除する。D1では削除ジョブの記録、関連ダウンロードトークン・通知履歴・メディア行の削除を同一batchで確定し、その後R2を削除する。R2削除に失敗したジョブは15分ごとのscheduled handlerで再試行し、`viewer` は拒否する。
 
 ### 8.5 LINE
 
