@@ -261,6 +261,7 @@ function fakeGalleryEnv(
   listRows: Array<Record<string, unknown>> = [],
   assetOverrides: Record<string, unknown> = {},
   sourceBytes?: Uint8Array,
+  familyRows: Array<Record<string, unknown>> = [{ id: 'fam_1', name: '家族', role: 'owner' }],
 ): Env {
   const db = {
     prepare(sql: string) {
@@ -292,7 +293,7 @@ function fakeGalleryEnv(
             },
             async all() {
               if (sql.includes('FROM family_members fm')) {
-                return { results: [{ id: 'fam_1', name: '家族', role: 'owner' }] };
+                return { results: familyRows };
               }
               if (sql.includes('FROM media_assets')) return { results: listRows };
               return { results: [] };
@@ -490,6 +491,39 @@ describe('gallery and RAW previews', () => {
         env,
       );
       expect(res.status).toBe(401);
+    }
+  });
+
+  it('spec: denies every media surface to an authenticated user without explicit family access', async () => {
+    const env = fakeGalleryEnv(
+      createDngHeaderFixture(),
+      new Uint8Array(),
+      [],
+      [],
+      {},
+      undefined,
+      [],
+    );
+    const requests = [
+      new Request('https://mrnks.2-38.com/api/families/fam_1/media', {
+        headers: { cookie: 'mrnks_session=test-token' },
+      }),
+      new Request('https://mrnks.2-38.com/api/media/ast_1/preview', {
+        headers: { cookie: 'mrnks_session=test-token' },
+      }),
+      new Request('https://mrnks.2-38.com/api/media/ast_1/content', {
+        headers: { cookie: 'mrnks_session=test-token' },
+      }),
+      new Request('https://mrnks.2-38.com/api/media/ast_1/download-url', {
+        method: 'POST',
+        headers: { cookie: 'mrnks_session=test-token' },
+      }),
+    ];
+
+    for (const request of requests) {
+      const response = await worker.fetch(request, env);
+      expect(response.status).toBe(403);
+      await expect(response.json()).resolves.toMatchObject({ error: 'forbidden' });
     }
   });
 
