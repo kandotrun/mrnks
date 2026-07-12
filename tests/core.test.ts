@@ -26,6 +26,7 @@ describe('core utilities', () => {
 
   it('normalizes missing browser MIME types from known media extensions', () => {
     expect(normalizeMediaMimeType('L1002970.DNG', '')).toBe('image/x-adobe-dng');
+    expect(normalizeMediaMimeType('_DSC9863.ARW', 'application/octet-stream')).toBe('image/x-sony-arw');
     expect(normalizeMediaMimeType('IMG_1234.HEIC', 'application/octet-stream')).toBe('image/heic');
     expect(normalizeMediaMimeType('clip.MOV', 'application/octet-stream')).toBe('video/quicktime');
     expect(normalizeMediaMimeType('photo.jpg', 'image/jpeg; charset=binary')).toBe('image/jpeg');

@@ -580,7 +580,7 @@ export function renderAppHtml(): string {
       <section class="well">
         <h2>2. 写真・動画を追加</h2>
         <p class="help-block">LINEトークではなく、ここから原本を選んでください。保存時にSHA-256を照合します。</p>
-        <input id="fileInput" type="file" multiple accept="image/*,video/*,.dng,.DNG" aria-label="保存する写真・動画を選択" />
+        <input id="fileInput" type="file" multiple accept="image/*,video/*,.dng,.DNG,.arw,.ARW" aria-label="保存する写真・動画を選択" />
         <div class="button-row">
           <button id="uploadButton" class="btn btn-primary" type="button">原本をアップロード</button>
         </div>
@@ -859,8 +859,13 @@ function canvasToJpeg(canvas, quality) {
   return new Promise((resolve) => canvas.toBlob(resolve, 'image/jpeg', quality));
 }
 
+function isRawFilename(filename) {
+  const lower = String(filename || '').toLowerCase();
+  return lower.endsWith('.dng') || lower.endsWith('.arw');
+}
+
 async function createNotificationPreview(file) {
-  if (!file.type.startsWith('image/') || file.name.toLowerCase().endsWith('.dng')) return null;
+  if (!file.type.startsWith('image/') || isRawFilename(file.name)) return null;
   let decoded;
   try {
     decoded = await decodeImageFile(file);
@@ -974,8 +979,10 @@ function formatBytes(bytes) {
   return bytes + 'B';
 }
 
-function isDng(item) {
-  return item.mimeType === 'image/x-adobe-dng' || item.originalFilename.toLowerCase().endsWith('.dng');
+function isRaw(item) {
+  return item.mimeType === 'image/x-adobe-dng'
+    || item.mimeType === 'image/x-sony-arw'
+    || isRawFilename(item.originalFilename);
 }
 
 function renderGallery(assets) {
@@ -1016,11 +1023,11 @@ function renderGallery(assets) {
 
       const placeholder = document.createElement('span');
       placeholder.className = 'gallery-placeholder';
-      placeholder.textContent = item.type === 'video' ? 'VIDEO' : isDng(item) ? 'RAW' : 'IMAGE';
+      placeholder.textContent = item.type === 'video' ? 'VIDEO' : isRaw(item) ? 'RAW' : 'IMAGE';
       button.appendChild(placeholder);
 
       let media = null;
-      if (item.type === 'image' || isDng(item)) {
+      if (item.type === 'image' || isRaw(item)) {
         media = document.createElement('img');
         media.src = item.previewUrl;
         media.alt = '';
@@ -1033,7 +1040,7 @@ function renderGallery(assets) {
         button.appendChild(media);
       }
 
-      if (isDng(item)) {
+      if (isRaw(item)) {
         const rawBadge = document.createElement('span');
         rawBadge.className = 'gallery-badge';
         rawBadge.textContent = 'RAW';
@@ -1109,7 +1116,7 @@ function openGalleryItem(assetId) {
   const index = state.assets.findIndex((asset) => asset.id === item.id);
   $('galleryTitle').textContent = (index + 1) + ' / ' + state.assets.length;
   $('galleryMetaPrimary').textContent = item.originalFilename;
-  $('galleryMetaSecondary').textContent = formatGalleryDay(assetDate(item)) + ' ・ ' + formatBytes(item.sizeBytes) + (isDng(item) ? ' ・ RAW' : '');
+  $('galleryMetaSecondary').textContent = formatGalleryDay(assetDate(item)) + ' ・ ' + formatBytes(item.sizeBytes) + (isRaw(item) ? ' ・ RAW' : '');
   $('galleryPrevButton').disabled = state.assets.length < 2;
   $('galleryNextButton').disabled = state.assets.length < 2;
 

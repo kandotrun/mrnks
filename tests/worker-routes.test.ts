@@ -42,6 +42,7 @@ describe('public Worker routes', () => {
     expect(html).toContain('まるのこし');
     expect(html).toContain('原本');
     expect(html).toContain('type="file"');
+    expect(html).toContain('.arw,.ARW');
   });
 
   it('serves a Bootstrap 2-inspired layout with responsive local styles', async () => {
@@ -91,7 +92,7 @@ describe('public Worker routes', () => {
     expect(html).toContain('event.target instanceof HTMLMediaElement');
 
     const galleryRenderer = html.match(/function renderGallery\([\s\S]*?async function downloadOriginal/)?.[0] || '';
-    expect(galleryRenderer).toContain("item.type === 'image' || isDng(item)");
+    expect(galleryRenderer).toContain("item.type === 'image' || isRaw(item)");
     expect(galleryRenderer).not.toContain("document.createElement('video')");
   });
 });

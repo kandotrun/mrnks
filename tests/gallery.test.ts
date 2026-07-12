@@ -10,13 +10,14 @@ interface PreviewDescriptor {
 }
 
 const parser = (core as unknown as {
-  findDngJpegPreview?: (bytes: Uint8Array) => PreviewDescriptor | null;
-}).findDngJpegPreview;
+  findRawJpegPreview?: (bytes: Uint8Array) => PreviewDescriptor | null;
+}).findRawJpegPreview;
 
 function writeIfd(
   view: DataView,
   offset: number,
   entries: Array<{ tag: number; type: number; count: number; value: number }>,
+  nextIfdOffset = 0,
 ): void {
   view.setUint16(offset, entries.length, true);
   entries.forEach((entry, index) => {
@@ -31,7 +32,21 @@ function writeIfd(
       view.setUint32(base + 8, entry.value, true);
     }
   });
-  view.setUint32(offset + 2 + entries.length * 12, 0, true);
+  view.setUint32(offset + 2 + entries.length * 12, nextIfdOffset, true);
+}
+
+function createJpegHeader(width: number, height: number): Uint8Array {
+  return new Uint8Array([
+    0xff, 0xd8,
+    0xff, 0xc0, 0x00, 0x11, 0x08,
+    (height >> 8) & 0xff, height & 0xff,
+    (width >> 8) & 0xff, width & 0xff,
+    0x03,
+    0x01, 0x11, 0x00,
+    0x02, 0x11, 0x00,
+    0x03, 0x11, 0x00,
+    0xff, 0xd9,
+  ]);
 }
 
 function createDngHeaderFixture(): Uint8Array {
@@ -64,6 +79,41 @@ function createDngHeaderFixture(): Uint8Array {
   jpegIfd(400, 9_504, 6_320, 2_500, 2_000_000);
   jpegIfd(600, 2_112, 1_408, 3_000, 6);
   return bytes;
+}
+
+function createArwHeaderFixture(): { header: Uint8Array; jpeg: Uint8Array } {
+  const header = new Uint8Array(4_096);
+  const view = new DataView(header.buffer);
+  const galleryJpeg = createJpegHeader(1_616, 1_080);
+  header[0] = 0x49;
+  header[1] = 0x49;
+  view.setUint16(2, 42, true);
+  view.setUint32(4, 8, true);
+
+  // Sony ARWはIFD0に幅・高さタグのない旧JPEGサムネイルを持ち、
+  // linked IFD側にフル解像度JPEGプレビューを持つ。
+  writeIfd(view, 8, [
+    { tag: 254, type: 4, count: 1, value: 1 },
+    { tag: 259, type: 3, count: 1, value: 6 },
+    { tag: 513, type: 4, count: 1, value: 3_000 },
+    { tag: 514, type: 4, count: 1, value: galleryJpeg.byteLength },
+  ], 200);
+  writeIfd(view, 200, [
+    { tag: 254, type: 4, count: 1, value: 1 },
+    { tag: 259, type: 3, count: 1, value: 6 },
+  ], 400);
+  writeIfd(view, 400, [
+    { tag: 254, type: 4, count: 1, value: 1 },
+    { tag: 256, type: 4, count: 1, value: 7_008 },
+    { tag: 257, type: 4, count: 1, value: 4_672 },
+    { tag: 259, type: 3, count: 1, value: 7 },
+    { tag: 262, type: 3, count: 1, value: 6 },
+    { tag: 277, type: 3, count: 1, value: 3 },
+    { tag: 513, type: 4, count: 1, value: 3_500 },
+    { tag: 514, type: 4, count: 1, value: 2_245_043 },
+  ]);
+  header.set(galleryJpeg, 3_000);
+  return { header, jpeg: galleryJpeg };
 }
 
 function fakeR2Object(bytes: Uint8Array, range?: R2Range): R2ObjectBody {
@@ -166,7 +216,7 @@ function fakeGalleryEnv(
   };
 }
 
-describe('gallery and DNG previews', () => {
+describe('gallery and RAW previews', () => {
   it('selects a gallery-sized embedded JPEG instead of the full-resolution DNG preview', () => {
     expect(parser).toBeTypeOf('function');
     expect(parser?.(createDngHeaderFixture())).toEqual({
@@ -174,6 +224,17 @@ describe('gallery and DNG previews', () => {
       length: 6,
       width: 2_112,
       height: 1_408,
+    });
+  });
+
+  it('selects the gallery-sized old-JPEG thumbnail embedded in Sony ARW', () => {
+    const { header, jpeg } = createArwHeaderFixture();
+    expect(parser).toBeTypeOf('function');
+    expect(parser?.(header)).toEqual({
+      offset: 3_000,
+      length: jpeg.byteLength,
+      width: 1_616,
+      height: 1_080,
     });
   });
 
@@ -216,6 +277,31 @@ describe('gallery and DNG previews', () => {
     expect(rangeCalls).toEqual([
       { offset: 0, length: 1_048_576 },
       { offset: 3_000, length: 6 },
+    ]);
+  });
+
+  it('serves the embedded Sony ARW JPEG through the authenticated preview endpoint', async () => {
+    const { header, jpeg } = createArwHeaderFixture();
+    const rangeCalls: Array<{ offset?: number; length?: number }> = [];
+    const res = await worker.fetch(
+      new Request('https://mrnks.2-38.com/api/media/ast_1/preview', {
+        headers: { cookie: 'mrnks_session=test-token' },
+      }),
+      fakeGalleryEnv(header, jpeg, rangeCalls, [], {
+        original_filename: '_DSC9863.arw',
+        original_mime_type: 'image/x-sony-arw',
+        original_size_bytes: 68_538_368,
+        original_storage_key: 'originals/fam_1/ast_1/DSC9863.arw',
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toBe('image/jpeg');
+    expect(res.headers.get('x-mrnks-preview-source')).toBe('embedded-arw');
+    expect(new Uint8Array(await res.arrayBuffer())).toEqual(jpeg);
+    expect(rangeCalls).toEqual([
+      { offset: 0, length: 1_048_576 },
+      { offset: 3_000, length: jpeg.byteLength },
     ]);
   });
 

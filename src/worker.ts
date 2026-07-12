@@ -4,7 +4,7 @@ import {
   clearSessionCookie,
   contentDispositionAttachment,
   createSessionCookie,
-  findDngJpegPreview,
+  findRawJpegPreview,
   getOrigin,
   htmlResponse,
   jsonResponse,
@@ -89,7 +89,7 @@ const SESSION_TTL_SECONDS = 60 * 60 * 24 * 30;
 const GROUP_SESSION_TTL_SECONDS = 60 * 60;
 const DOWNLOAD_TTL_SECONDS = 60 * 10;
 const LINE_PREVIEW_MAX_BYTES = 1_000_000;
-const DNG_HEADER_READ_BYTES = 1024 * 1024;
+const RAW_HEADER_READ_BYTES = 1024 * 1024;
 const MEDIA_PAGE_SIZE = 60;
 const MAX_MEDIA_OFFSET = 1_000_000;
 const BROWSER_IMAGE_MIME_TYPES = new Set([
@@ -291,9 +291,9 @@ async function handleUploadMedia(
   }
 
   if (!notificationPreviewBytes) {
-    const dngPreview = extractLinePreviewFromDng(bytes, rawFilename, mimeType);
-    if (dngPreview) {
-      notificationPreviewBytes = dngPreview;
+    const rawPreview = extractLinePreviewFromRaw(bytes, rawFilename, mimeType);
+    if (rawPreview) {
+      notificationPreviewBytes = rawPreview;
       notificationPreviewMimeType = 'image/jpeg';
     } else if (
       bytes.byteLength <= LINE_PREVIEW_MAX_BYTES
@@ -404,10 +404,28 @@ function assertLineNotificationPreview(bytes: Uint8Array, mimeType: string): voi
   if (!isJpeg && !isPng) throw new HttpError(415, 'notification_preview_invalid');
 }
 
-function extractLinePreviewFromDng(bytes: Uint8Array, filename: string, mimeType: string): Uint8Array | null {
-  const isDng = mimeType === 'image/x-adobe-dng' || filename.toLowerCase().endsWith('.dng');
-  if (!isDng) return null;
-  const descriptor = findDngJpegPreview(bytes);
+type RawPreviewFormat = 'dng' | 'arw';
+
+function rawPreviewFormat(filename: string, mimeType: string): RawPreviewFormat | null {
+  const lowerFilename = filename.toLowerCase();
+  const normalizedMime = mimeType.toLowerCase();
+  if (normalizedMime === 'image/x-adobe-dng' || normalizedMime === 'image/dng' || lowerFilename.endsWith('.dng')) {
+    return 'dng';
+  }
+  if (
+    normalizedMime === 'image/x-sony-arw'
+    || normalizedMime === 'image/arw'
+    || normalizedMime === 'image/x-sony-raw'
+    || lowerFilename.endsWith('.arw')
+  ) {
+    return 'arw';
+  }
+  return null;
+}
+
+function extractLinePreviewFromRaw(bytes: Uint8Array, filename: string, mimeType: string): Uint8Array | null {
+  if (!rawPreviewFormat(filename, mimeType)) return null;
+  const descriptor = findRawJpegPreview(bytes);
   if (!descriptor || descriptor.length > LINE_PREVIEW_MAX_BYTES) return null;
   if (descriptor.offset < 0 || descriptor.offset + descriptor.length > bytes.byteLength) return null;
   const preview = bytes.slice(descriptor.offset, descriptor.offset + descriptor.length);
@@ -584,16 +602,16 @@ async function handleLineNotificationPreview(env: Env, assetId: string, token: s
 
 async function handleMediaPreview(request: Request, env: Env, assetId: string): Promise<Response> {
   const asset = await loadAuthorizedMediaAsset(request, env, assetId);
-  const isDng = asset.original_mime_type === 'image/x-adobe-dng' || asset.original_filename.toLowerCase().endsWith('.dng');
+  const rawFormat = rawPreviewFormat(asset.original_filename, asset.original_mime_type);
 
-  if (isDng) {
+  if (rawFormat) {
     const headerObject = await env.MEDIA_BUCKET.get(asset.original_storage_key, {
-      range: { offset: 0, length: Math.min(DNG_HEADER_READ_BYTES, asset.original_size_bytes) },
+      range: { offset: 0, length: Math.min(RAW_HEADER_READ_BYTES, asset.original_size_bytes) },
     });
     if (!headerObject) throw new HttpError(404, 'original_object_not_found');
-    const descriptor = findDngJpegPreview(await headerObject.bytes());
+    const descriptor = findRawJpegPreview(await headerObject.bytes());
     if (!descriptor || descriptor.offset + descriptor.length > asset.original_size_bytes) {
-      throw new HttpError(415, 'dng_preview_unavailable');
+      throw new HttpError(415, 'raw_preview_unavailable');
     }
 
     const previewObject = await env.MEDIA_BUCKET.get(asset.original_storage_key, {
@@ -602,7 +620,7 @@ async function handleMediaPreview(request: Request, env: Env, assetId: string): 
     if (!previewObject) throw new HttpError(404, 'original_object_not_found');
     const previewBytes = await previewObject.bytes();
     if (previewBytes.byteLength < 2 || previewBytes[0] !== 0xff || previewBytes[1] !== 0xd8) {
-      throw new HttpError(415, 'dng_preview_invalid');
+      throw new HttpError(415, 'raw_preview_invalid');
     }
 
     const responseBytes = new Uint8Array(previewBytes.byteLength);
@@ -614,7 +632,7 @@ async function handleMediaPreview(request: Request, env: Env, assetId: string): 
         'cache-control': 'private, max-age=86400',
         'vary': 'Cookie',
         'x-content-type-options': 'nosniff',
-        'x-mrnks-preview-source': 'embedded-dng',
+        'x-mrnks-preview-source': `embedded-${rawFormat}`,
       },
     });
   }

@@ -124,6 +124,7 @@ export function normalizeMediaMimeType(filename: string, contentType: string | n
 
   const extension = filename.toLowerCase().match(/\.([a-z0-9]+)$/)?.[1] || '';
   const byExtension: Record<string, string> = {
+    arw: 'image/x-sony-arw',
     dng: 'image/x-adobe-dng',
     heic: 'image/heic',
     heif: 'image/heif',
@@ -189,7 +190,7 @@ export interface EmbeddedJpegPreview {
   height: number;
 }
 
-export function findDngJpegPreview(bytes: Uint8Array): EmbeddedJpegPreview | null {
+export function findRawJpegPreview(bytes: Uint8Array): EmbeddedJpegPreview | null {
   if (bytes.byteLength < 8) return null;
   const littleEndian = bytes[0] === 0x49 && bytes[1] === 0x49;
   const bigEndian = bytes[0] === 0x4d && bytes[1] === 0x4d;
@@ -222,7 +223,7 @@ export function findDngJpegPreview(bytes: Uint8Array): EmbeddedJpegPreview | nul
     return values;
   };
 
-  const readIfd = (offset: number): Map<number, number[]> | null => {
+  const readIfd = (offset: number): { tags: Map<number, number[]>; nextOffset: number } | null => {
     const entryCount = readUint16(offset);
     if (entryCount === null || entryCount > 4_096) return null;
     const entriesEnd = offset + 2 + entryCount * 12;
@@ -237,32 +238,79 @@ export function findDngJpegPreview(bytes: Uint8Array): EmbeddedJpegPreview | nul
       const values = readValues(entryOffset, type, count);
       if (values) tags.set(tag, values);
     }
-    return tags;
+    return { tags, nextOffset: readUint32(entriesEnd) ?? 0 };
+  };
+
+  const readJpegDimensions = (offset: number, length: number): { width: number; height: number } | null => {
+    const end = Math.min(view.byteLength, offset + length);
+    if (offset < 0 || offset + 4 > end || bytes[offset] !== 0xff || bytes[offset + 1] !== 0xd8) return null;
+    let cursor = offset + 2;
+    while (cursor + 4 <= end) {
+      if (bytes[cursor] !== 0xff) {
+        cursor += 1;
+        continue;
+      }
+      while (cursor < end && bytes[cursor] === 0xff) cursor += 1;
+      if (cursor >= end) break;
+      const marker = bytes[cursor];
+      cursor += 1;
+      if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue;
+      if (marker === 0xd9 || marker === 0xda || cursor + 2 > end) break;
+      const segmentLength = (bytes[cursor] << 8) | bytes[cursor + 1];
+      if (segmentLength < 2 || cursor + segmentLength > end) break;
+      const isStartOfFrame = marker >= 0xc0 && marker <= 0xcf
+        && marker !== 0xc4
+        && marker !== 0xc8
+        && marker !== 0xcc;
+      if (isStartOfFrame && segmentLength >= 7) {
+        const height = (bytes[cursor + 3] << 8) | bytes[cursor + 4];
+        const width = (bytes[cursor + 5] << 8) | bytes[cursor + 6];
+        if (width > 0 && height > 0) return { width, height };
+      }
+      cursor += segmentLength;
+    }
+    return null;
   };
 
   const firstIfdOffset = readUint32(4);
   if (firstIfdOffset === null) return null;
-  const root = readIfd(firstIfdOffset);
-  if (!root) return null;
-
-  const directories = [root];
-  const subIfdOffsets = root.get(330) || [];
-  for (const offset of subIfdOffsets.slice(0, 32)) {
+  const directories: Array<Map<number, number[]>> = [];
+  const pendingOffsets = [firstIfdOffset];
+  const seenOffsets = new Set<number>();
+  while (pendingOffsets.length > 0 && directories.length < 64) {
+    const offset = pendingOffsets.shift();
+    if (offset === undefined || offset <= 0 || seenOffsets.has(offset)) continue;
+    seenOffsets.add(offset);
     const directory = readIfd(offset);
-    if (directory) directories.push(directory);
+    if (!directory) continue;
+    directories.push(directory.tags);
+    if (directory.nextOffset > 0) pendingOffsets.push(directory.nextOffset);
+    for (const subIfdOffset of (directory.tags.get(330) || []).slice(0, 32)) {
+      if (subIfdOffset > 0) pendingOffsets.push(subIfdOffset);
+    }
   }
 
   const candidates: EmbeddedJpegPreview[] = [];
   for (const directory of directories) {
-    const width = directory.get(256)?.[0];
-    const height = directory.get(257)?.[0];
     const compression = directory.get(259)?.[0];
-    const photometric = directory.get(262)?.[0];
+    if (compression !== 6 && compression !== 7) continue;
+
+    const interchangeOffset = directory.get(513)?.[0];
+    const interchangeLength = directory.get(514)?.[0];
     const samplesPerPixel = directory.get(277)?.[0];
-    const jpegOffset = directory.get(513)?.[0] ?? directory.get(273)?.[0] ?? directory.get(324)?.[0];
-    const jpegLength = directory.get(514)?.[0] ?? directory.get(279)?.[0] ?? directory.get(325)?.[0];
-    if (!width || !height || compression !== 7 || (!samplesPerPixel || samplesPerPixel < 3) && photometric !== 6) continue;
-    if (jpegOffset === undefined || !jpegLength || jpegLength > 10 * 1024 * 1024) continue;
+    const photometric = directory.get(262)?.[0];
+    const rgbJpeg = (samplesPerPixel !== undefined && samplesPerPixel >= 3) || photometric === 6;
+    const jpegOffset = interchangeOffset
+      ?? (rgbJpeg ? directory.get(273)?.[0] ?? directory.get(324)?.[0] : undefined);
+    const jpegLength = interchangeLength
+      ?? (rgbJpeg ? directory.get(279)?.[0] ?? directory.get(325)?.[0] : undefined);
+    if (jpegOffset === undefined || !Number.isSafeInteger(jpegOffset) || jpegOffset < 0) continue;
+    if (jpegLength === undefined || !Number.isSafeInteger(jpegLength) || jpegLength <= 0 || jpegLength > 10 * 1024 * 1024) continue;
+
+    const jpegDimensions = readJpegDimensions(jpegOffset, jpegLength);
+    const width = directory.get(256)?.[0] ?? jpegDimensions?.width;
+    const height = directory.get(257)?.[0] ?? jpegDimensions?.height;
+    if (!width || !height) continue;
     candidates.push({ offset: jpegOffset, length: jpegLength, width, height });
   }
   if (candidates.length === 0) return null;
@@ -272,6 +320,10 @@ export function findDngJpegPreview(bytes: Uint8Array): EmbeddedJpegPreview | nul
     .sort((a, b) => (a.width * a.height) - (b.width * b.height));
   if (gallerySized.length > 0) return gallerySized[0];
   return candidates.sort((a, b) => (b.width * b.height) - (a.width * a.height))[0];
+}
+
+export function findDngJpegPreview(bytes: Uint8Array): EmbeddedJpegPreview | null {
+  return findRawJpegPreview(bytes);
 }
 
 function encodePathSegment(value: string): string {
