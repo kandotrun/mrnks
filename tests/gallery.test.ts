@@ -336,6 +336,83 @@ function fakeGalleryEnv(
   };
 }
 
+interface DeleteCapture {
+  deletedKeys: string[];
+  runs: Array<{ sql: string; values: unknown[] }>;
+}
+
+function fakeDeleteEnv(
+  role: 'owner' | 'admin' | 'uploader' | 'viewer',
+  capture: DeleteCapture,
+  assetExists = true,
+  assetFamilyId = 'fam_1',
+): Env {
+  const db = {
+    prepare(sql: string) {
+      return {
+        bind(...values: unknown[]) {
+          return {
+            async first<T>() {
+              if (sql.includes('FROM sessions s')) {
+                return {
+                  id: 'usr_1',
+                  display_name: 'Kan',
+                  picture_url: null,
+                  expires_at: new Date(Date.now() + 60_000).toISOString(),
+                  line_group_binding_id: null,
+                } as T;
+              }
+              if (sql.includes('FROM media_assets')) {
+                if (!assetExists) return null;
+                return {
+                  id: 'ast_1',
+                  family_id: assetFamilyId,
+                  original_storage_key: 'originals/fam_1/ast_1/sample.arw',
+                  notification_preview_storage_key: 'previews/fam_1/ast_1/line.jpg',
+                } as T;
+              }
+              return null;
+            },
+            async all<T>() {
+              if (sql.includes('FROM family_members fm')) {
+                return { results: [{ id: 'fam_1', name: '家族', role }] as T[] };
+              }
+              return { results: [] as T[] };
+            },
+            async run() {
+              capture.runs.push({ sql, values });
+              return { success: true, meta: { changes: 1 } };
+            },
+          };
+        },
+      };
+    },
+    async batch(statements: Array<{ run(): Promise<unknown> }>) {
+      return Promise.all(statements.map((statement) => statement.run()));
+    },
+  } as unknown as D1Database;
+
+  const bucket = {
+    async delete(keys: string | string[]) {
+      capture.deletedKeys.push(...(Array.isArray(keys) ? keys : [keys]));
+    },
+  } as unknown as R2Bucket;
+
+  return {
+    ENVIRONMENT: 'test',
+    APP_ORIGIN: 'https://mrnks.2-38.com',
+    LINE_LIFF_ID: 'test-liff-id',
+    LINE_LOGIN_CHANNEL_ID: 'login-channel',
+    LINE_LOGIN_CHANNEL_SECRET: 'login-secret',
+    LINE_MESSAGING_CHANNEL_ID: 'messaging-channel',
+    LINE_MESSAGING_CHANNEL_SECRET: 'messaging-secret',
+    LINE_MESSAGING_CHANNEL_ACCESS_TOKEN: 'messaging-token',
+    SESSION_SECRET: 'test-session-secret',
+    DB: db,
+    MEDIA_BUCKET: bucket,
+  };
+}
+
 describe('gallery and RAW previews', () => {
   it('selects a gallery-sized embedded JPEG instead of the full-resolution DNG preview', async () => {
     expect(parser).toBeTypeOf('function');
@@ -399,6 +476,76 @@ describe('gallery and RAW previews', () => {
     );
 
     expect(res.status).toBe(403);
+  });
+
+  it.each(['owner', 'admin', 'uploader'] as const)(
+    'lets a %s permanently delete family media and its stored objects',
+    async (role) => {
+      const capture: DeleteCapture = { deletedKeys: [], runs: [] };
+      const res = await worker.fetch(new Request('https://mrnks.2-38.com/api/media/ast_1', {
+        method: 'DELETE',
+        headers: { cookie: 'mrnks_session=test-token' },
+      }), fakeDeleteEnv(role, capture));
+
+      expect(res.status).toBe(200);
+      await expect(res.json()).resolves.toEqual({ ok: true, assetId: 'ast_1' });
+      expect(capture.deletedKeys).toEqual([
+        'originals/fam_1/ast_1/sample.arw',
+        'previews/fam_1/ast_1/line.jpg',
+      ]);
+      expect(capture.runs.map(({ sql }) => sql)).toEqual([
+        expect.stringContaining('DELETE FROM line_notification_deliveries'),
+        expect.stringContaining('DELETE FROM download_tokens'),
+        expect.stringContaining('DELETE FROM media_assets'),
+      ]);
+    },
+  );
+
+  it('does not let a viewer delete family media or touch R2', async () => {
+    const capture: DeleteCapture = { deletedKeys: [], runs: [] };
+    const res = await worker.fetch(new Request('https://mrnks.2-38.com/api/media/ast_1', {
+      method: 'DELETE',
+      headers: { cookie: 'mrnks_session=test-token' },
+    }), fakeDeleteEnv('viewer', capture));
+
+    expect(res.status).toBe(403);
+    expect(capture.deletedKeys).toEqual([]);
+    expect(capture.runs).toEqual([]);
+  });
+
+  it('requires authentication before deleting media', async () => {
+    const capture: DeleteCapture = { deletedKeys: [], runs: [] };
+    const res = await worker.fetch(new Request('https://mrnks.2-38.com/api/media/ast_1', {
+      method: 'DELETE',
+    }), fakeDeleteEnv('owner', capture));
+
+    expect(res.status).toBe(401);
+    expect(capture.deletedKeys).toEqual([]);
+    expect(capture.runs).toEqual([]);
+  });
+
+  it('does not let an editor delete media from another family', async () => {
+    const capture: DeleteCapture = { deletedKeys: [], runs: [] };
+    const res = await worker.fetch(new Request('https://mrnks.2-38.com/api/media/ast_1', {
+      method: 'DELETE',
+      headers: { cookie: 'mrnks_session=test-token' },
+    }), fakeDeleteEnv('owner', capture, true, 'fam_2'));
+
+    expect(res.status).toBe(403);
+    expect(capture.deletedKeys).toEqual([]);
+    expect(capture.runs).toEqual([]);
+  });
+
+  it('returns 404 without storage side effects when deleting missing media', async () => {
+    const capture: DeleteCapture = { deletedKeys: [], runs: [] };
+    const res = await worker.fetch(new Request('https://mrnks.2-38.com/api/media/missing', {
+      method: 'DELETE',
+      headers: { cookie: 'mrnks_session=test-token' },
+    }), fakeDeleteEnv('owner', capture, false));
+
+    expect(res.status).toBe(404);
+    expect(capture.deletedKeys).toEqual([]);
+    expect(capture.runs).toEqual([]);
   });
 
   it('serves the embedded DNG JPEG through the authenticated preview endpoint', async () => {

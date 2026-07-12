@@ -119,4 +119,18 @@ describe('public Worker routes', () => {
     expect(galleryRenderer).toContain("item.type === 'image' || isRaw(item)");
     expect(galleryRenderer).not.toContain("document.createElement('video')");
   });
+
+  it('shows permanent deletion only to editors and requires explicit confirmation', async () => {
+    const res = await worker.fetch(new Request('https://mrnks.2-38.com/'), fakeEnv());
+    const html = await res.text();
+
+    expect(html).toContain('id="galleryDeleteButton"');
+    expect(html).toContain('id="deleteMediaDialog"');
+    expect(html).toContain('id="deleteMediaConfirmButton"');
+    expect(html).toContain('元に戻せません');
+    expect(html).toContain("$('galleryDeleteButton').hidden = !state.canUpload");
+    expect(html).toContain("method: 'DELETE'");
+    expect(html).toContain('async function deleteActiveMedia');
+    expect(html).toContain("openDialog($('deleteMediaDialog'))");
+  });
 });

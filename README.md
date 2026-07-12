@@ -37,7 +37,7 @@ Live: https://mrnks.2-38.com/
 - DNG / Sony ARW内の埋め込みJPEGを使ったRAWプレビュー（プレビュー非搭載RAWも原本は無変換で保持）
 - 短命URLによる原本ダウンロード
 - LINE webhook 署名検証、グループ招待時の一回限り設定リンク、案内返信
-- LINEグループ単位の `viewer` / `uploader` 権限（在籍確認つき1時間セッション）
+- LINEグループ単位の `viewer` / `uploader` 権限（`uploader` は原本の追加・削除、在籍確認つき1時間セッション）
 - 新規アップロード時のLINE通知（1MB以下の限定プレビュー + 投稿者名、二重送信防止）
 - グループ参加時の案内・アップロード通知からLIFFを起動
 

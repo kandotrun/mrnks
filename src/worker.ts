@@ -150,6 +150,11 @@ async function route(request: Request, env: Env, ctx?: ExecutionContext): Promis
   if (familyMediaMatch && request.method === 'GET') return handleListMedia(request, env, decodeURIComponent(familyMediaMatch[1]));
   if (familyMediaMatch && request.method === 'PUT') return handleUploadMedia(request, env, decodeURIComponent(familyMediaMatch[1]), ctx);
 
+  const mediaAssetMatch = path.match(/^\/api\/media\/([^/]+)$/);
+  if (mediaAssetMatch && request.method === 'DELETE') {
+    return handleDeleteMedia(request, env, decodeURIComponent(mediaAssetMatch[1]));
+  }
+
   const linePreviewMatch = path.match(/^\/api\/line-preview\/([^/]+)\/([a-f0-9]{64})$/);
   if (linePreviewMatch && request.method === 'GET') {
     return handleLineNotificationPreview(
@@ -574,6 +579,35 @@ async function loadAuthorizedMediaAsset(request: Request, env: Env, assetId: str
   return asset;
 }
 
+async function handleDeleteMedia(request: Request, env: Env, assetId: string): Promise<Response> {
+  const user = await requireUser(request, env);
+  const asset = await env.DB.prepare(
+    `SELECT id, family_id, original_storage_key, notification_preview_storage_key
+       FROM media_assets
+      WHERE id = ?
+      LIMIT 1`,
+  ).bind(assetId).first<{
+    id: string;
+    family_id: string;
+    original_storage_key: string;
+    notification_preview_storage_key: string | null;
+  }>();
+  if (!asset) throw new HttpError(404, 'asset_not_found');
+  await requireFamilyRole(user, asset.family_id, ['owner', 'admin', 'uploader']);
+
+  const storageKeys = [asset.original_storage_key];
+  if (asset.notification_preview_storage_key) storageKeys.push(asset.notification_preview_storage_key);
+  await env.MEDIA_BUCKET.delete(storageKeys);
+
+  await env.DB.batch([
+    env.DB.prepare('DELETE FROM line_notification_deliveries WHERE media_asset_id = ?').bind(asset.id),
+    env.DB.prepare('DELETE FROM download_tokens WHERE media_asset_id = ?').bind(asset.id),
+    env.DB.prepare('DELETE FROM media_assets WHERE id = ?').bind(asset.id),
+  ]);
+
+  return jsonResponse({ ok: true, assetId: asset.id });
+}
+
 async function handleLineNotificationPreview(env: Env, assetId: string, token: string): Promise<Response> {
   const expected = await hashSecretToken(`line-preview:${assetId}`, env.SESSION_SECRET);
   if (!timingSafeEqual(expected, token)) throw new HttpError(404, 'preview_not_found');
@@ -978,7 +1012,7 @@ async function handleBindLineGroup(request: Request, env: Env): Promise<Response
   try {
     await pushLineMessages(env, binding.line_group_id, [{
       type: 'text',
-      text: `「${binding.group_name}」を家族アルバムに連携しました。\n権限: ${body.role === 'uploader' ? '閲覧・投稿' : '閲覧のみ'}\n${groupUrl}`,
+      text: `「${binding.group_name}」を家族アルバムに連携しました。\n権限: ${body.role === 'uploader' ? '閲覧・編集' : '閲覧のみ'}\n${groupUrl}`,
     }]);
   } catch (error) {
     confirmationSent = false;

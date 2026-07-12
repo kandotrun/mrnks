@@ -307,7 +307,7 @@ CREATE TABLE notification_events (
 
 ### 7.8 LINE group bindings
 
-LINEグループは家族アルバムへ紐づけ、グループ由来では `viewer` または `uploader` だけを付与する。`owner` / `admin` は既存の `family_members` を権威とし、LINEグループから昇格させない。
+LINEグループは家族アルバムへ紐づけ、グループ由来では `viewer` または `uploader` だけを付与する。`viewer` は閲覧のみ、`uploader` は原本の追加・削除ができる。`owner` / `admin` は既存の `family_members` を権威とし、LINEグループから昇格させない。
 
 - 招待時: `join` webhookでgroup ID・名称・ハッシュ化した一回限り設定トークンを保存
 - 設定時: 既存familyのowner/adminかつ対象LINEグループの現メンバーであることを検証
@@ -424,6 +424,10 @@ multipart upload を完了し、ハッシュとサイズを確定する。
 #### `POST /api/media/:assetId/download-url`
 
 原本ダウンロード用の期限付きURLを発行する。
+
+#### `DELETE /api/media/:assetId`
+
+`owner` / `admin` / `uploader` が、同じ家族アルバムの原本と通知用プレビューを完全削除する。関連するダウンロードトークンと通知履歴も削除し、`viewer` は拒否する。
 
 ### 8.5 LINE
 

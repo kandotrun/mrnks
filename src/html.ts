@@ -483,7 +483,16 @@ export function renderAppHtml(): string {
       white-space: nowrap;
     }
     .gallery-meta-secondary { color: #aaaaaa; font-size: 12px; line-height: 18px; }
+    .gallery-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; }
     .gallery-download { flex: 0 0 auto; }
+    .gallery-delete {
+      border-color: #9d2d2d;
+      color: #ffffff;
+      background: #7e2525;
+      background-image: none;
+      text-shadow: none;
+    }
+    .gallery-delete:hover, .gallery-delete:focus { color: #ffffff; background: #9d2d2d; }
     .alert {
       margin-bottom: 20px;
       padding: 8px 14px;
@@ -607,7 +616,7 @@ export function renderAppHtml(): string {
       font-size: 15px;
       line-height: 1.8;
     }
-    .primary-action, .secondary-action, .quiet-action {
+    .primary-action, .secondary-action, .quiet-action, .danger-action {
       min-height: 46px;
       padding: 11px 18px;
       border: 0;
@@ -622,9 +631,11 @@ export function renderAppHtml(): string {
       box-shadow: 0 8px 20px rgba(22, 131, 74, .2);
     }
     .primary-action:hover, .primary-action:focus-visible { background: var(--app-accent-strong); }
-    .primary-action:disabled { opacity: .48; cursor: not-allowed; box-shadow: none; }
+    .primary-action:disabled, .danger-action:disabled { opacity: .48; cursor: not-allowed; box-shadow: none; }
     .secondary-action { color: var(--app-text); background: #eef1ee; }
     .secondary-action:hover, .secondary-action:focus-visible { background: #e4e9e5; }
+    .danger-action { color: #ffffff; background: #b52b2b; }
+    .danger-action:hover, .danger-action:focus-visible { background: #902020; }
     .quiet-action {
       min-height: 40px;
       padding: 8px 12px;
@@ -814,6 +825,34 @@ export function renderAppHtml(): string {
       box-shadow: var(--app-shadow);
     }
     .upload-sheet::backdrop, .settings-dialog::backdrop { background: rgba(16, 23, 18, .48); backdrop-filter: blur(2px); }
+    .confirm-dialog {
+      width: min(420px, calc(100vw - 32px));
+      max-width: none;
+      padding: 0;
+      overflow: hidden;
+      border: 0;
+      border-radius: 18px;
+      color: var(--app-text);
+      background: var(--app-surface);
+      box-shadow: var(--app-shadow);
+    }
+    .confirm-dialog::backdrop { background: rgba(16, 23, 18, .64); backdrop-filter: blur(3px); }
+    .confirm-body { padding: 24px; }
+    .confirm-body h2 { margin: 0; font-size: 21px; line-height: 1.35; letter-spacing: -.03em; }
+    .confirm-description { margin: 10px 0 0; color: var(--app-muted); font-size: 14px; line-height: 1.65; }
+    .confirm-filename {
+      margin: 18px 0 0;
+      padding: 12px 14px;
+      overflow: hidden;
+      border-radius: 10px;
+      background: #f1f3f1;
+      font-size: 13px;
+      font-weight: 700;
+      line-height: 1.5;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .confirm-actions { display: grid; grid-template-columns: 1fr 1fr; margin-top: 22px; gap: 10px; }
     .sheet-body { padding: 8px 24px max(24px, calc(18px + env(safe-area-inset-bottom))); }
     .sheet-handle { width: 42px; height: 5px; margin: 4px auto 18px; border-radius: 3px; background: #d8ddd9; }
     .sheet-header { display: flex; margin-bottom: 18px; align-items: flex-start; justify-content: space-between; gap: 14px; }
@@ -977,7 +1016,7 @@ export function renderAppHtml(): string {
       <label for="groupRoleSelect">グループメンバーの権限</label>
       <select id="groupRoleSelect" class="form-control">
         <option value="viewer">閲覧のみ</option>
-        <option value="uploader">閲覧・投稿</option>
+        <option value="uploader">閲覧・編集</option>
       </select>
     </div>
     <label class="checkbox-row" for="groupNotificationsEnabled">
@@ -1004,8 +1043,23 @@ export function renderAppHtml(): string {
         <div id="galleryMetaPrimary" class="gallery-meta-primary"></div>
         <div id="galleryMetaSecondary" class="gallery-meta-secondary"></div>
       </div>
-      <button id="galleryDownloadButton" class="btn btn-primary gallery-download" type="button">原本DL</button>
+      <div class="gallery-actions">
+        <button id="galleryDeleteButton" class="btn gallery-delete" type="button" hidden>削除</button>
+        <button id="galleryDownloadButton" class="btn btn-primary gallery-download" type="button">原本DL</button>
+      </div>
     </footer>
+  </div>
+</dialog>
+
+<dialog id="deleteMediaDialog" class="confirm-dialog" aria-modal="true" aria-labelledby="deleteMediaTitle" aria-describedby="deleteMediaDescription deleteMediaName">
+  <div class="confirm-body">
+    <h2 id="deleteMediaTitle">この写真・動画を削除しますか？</h2>
+    <p id="deleteMediaDescription" class="confirm-description">原本とプレビューが削除され、元に戻せません。</p>
+    <p id="deleteMediaName" class="confirm-filename"></p>
+    <div class="confirm-actions">
+      <button id="deleteMediaCancelButton" class="secondary-action" type="button">キャンセル</button>
+      <button id="deleteMediaConfirmButton" class="danger-action" type="button">完全に削除</button>
+    </div>
   </div>
 </dialog>
 <script type="module">
@@ -1132,7 +1186,7 @@ function applySession(session) {
   state.session = session;
   state.familyId = session.families?.[0]?.id || null;
   const family = session.families?.find((item) => item.id === state.familyId) || null;
-  const roleLabels = { owner: '管理者', admin: '管理者', uploader: '閲覧・投稿', viewer: '閲覧のみ' };
+  const roleLabels = { owner: '管理者', admin: '管理者', uploader: '閲覧・編集', viewer: '閲覧のみ' };
   const displayName = session.user?.displayName || 'LINE user';
   const roleLabel = family ? (roleLabels[family.role] || family.role) : '';
   const canUpload = Boolean(family && ['owner', 'admin', 'uploader'].includes(family.role));
@@ -1580,6 +1634,45 @@ async function downloadOriginal(item) {
   }
 }
 
+function openDeleteMediaDialog() {
+  if (!state.canUpload) return;
+  const item = state.assets.find((asset) => asset.id === state.activeAssetId);
+  if (!item) return;
+  $('deleteMediaName').textContent = item.originalFilename;
+  openDialog($('deleteMediaDialog'));
+  window.setTimeout(() => $('deleteMediaConfirmButton').focus(), 0);
+}
+
+function closeDeleteMediaDialog() {
+  closeDialog($('deleteMediaDialog'));
+}
+
+async function deleteActiveMedia() {
+  if (!state.canUpload) throw new Error('削除権限がありません。');
+  const item = state.assets.find((asset) => asset.id === state.activeAssetId);
+  if (!item) throw new Error('削除する写真・動画が見つかりません。');
+
+  const button = $('deleteMediaConfirmButton');
+  button.disabled = true;
+  button.textContent = '削除中...';
+  try {
+    await api('/api/media/' + encodeURIComponent(item.id), { method: 'DELETE' });
+    const previousTotal = Math.max(state.assets.length, Number(state.totalCount) || 0);
+    state.assets = state.assets.filter((asset) => asset.id !== item.id);
+    state.totalCount = Math.max(0, previousTotal - 1);
+    state.mediaOffset = Math.max(0, state.mediaOffset - 1);
+    state.mediaHasMore = state.assets.length < state.totalCount;
+    renderGallery(state.assets);
+    $('loadMoreMediaButton').hidden = !state.mediaHasMore;
+    closeDeleteMediaDialog();
+    closeGallery();
+    status('「' + item.originalFilename + '」を削除しました');
+  } finally {
+    button.disabled = false;
+    button.textContent = '完全に削除';
+  }
+}
+
 function clearGalleryStage() {
   const media = $('galleryStage').querySelector('.gallery-stage-media');
   if (media instanceof HTMLMediaElement) {
@@ -1625,6 +1718,7 @@ function openGalleryItem(assetId) {
   $('galleryMetaSecondary').textContent = formatGalleryDay(assetDate(item)) + ' ・ ' + formatBytes(item.sizeBytes) + (isRaw(item) ? ' ・ RAW' : '');
   $('galleryPrevButton').disabled = state.assets.length < 2;
   $('galleryNextButton').disabled = state.assets.length < 2;
+  $('galleryDeleteButton').hidden = !state.canUpload;
 
   const dialog = $('galleryDialog');
   if (!dialog.open) {
@@ -1705,9 +1799,21 @@ $('loadMoreMediaButton').addEventListener('click', () => loadMedia(false).catch(
 $('galleryCloseButton').addEventListener('click', closeGallery);
 $('galleryPrevButton').addEventListener('click', () => showRelativeAsset(-1));
 $('galleryNextButton').addEventListener('click', () => showRelativeAsset(1));
+$('galleryDeleteButton').addEventListener('click', openDeleteMediaDialog);
 $('galleryDownloadButton').addEventListener('click', () => {
   const item = state.assets.find((asset) => asset.id === state.activeAssetId);
   if (item) downloadOriginal(item).catch((e) => status('ERROR: ' + e.message));
+});
+$('deleteMediaCancelButton').addEventListener('click', closeDeleteMediaDialog);
+$('deleteMediaConfirmButton').addEventListener('click', () => deleteActiveMedia().catch((e) => status('ERROR: ' + e.message)));
+$('deleteMediaDialog').addEventListener('click', (event) => {
+  if (event.target === $('deleteMediaDialog')) closeDeleteMediaDialog();
+});
+$('deleteMediaDialog').addEventListener('close', () => {
+  $('deleteMediaName').textContent = '';
+  window.requestAnimationFrame(() => {
+    if ($('galleryDialog').open && !$('galleryDeleteButton').hidden) $('galleryDeleteButton').focus();
+  });
 });
 $('galleryDialog').addEventListener('click', (event) => {
   if (event.target === $('galleryDialog')) closeGallery();
