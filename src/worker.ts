@@ -945,6 +945,10 @@ async function handleListGalleryMessages(request: Request, env: Env, familyId: s
     day: search.get('day'),
   });
   await requireGalleryMessageTarget(env, familyId, target);
+  const requestedOffset = Number.parseInt(search.get('offset') || '0', 10);
+  const offset = Number.isFinite(requestedOffset)
+    ? Math.min(Math.max(requestedOffset, 0), MAX_MEDIA_OFFSET)
+    : 0;
 
   const query = target.targetType === 'media'
     ? env.DB.prepare(
@@ -955,8 +959,8 @@ async function handleListGalleryMessages(request: Request, env: Env, familyId: s
          JOIN users u ON u.id = gm.author_user_id
         WHERE gm.family_id = ? AND gm.target_type = 'media' AND gm.media_asset_id = ?
         ORDER BY gm.created_at DESC, gm.id DESC
-        LIMIT ?`,
-    ).bind(familyId, target.mediaId, MESSAGE_PAGE_SIZE)
+        LIMIT ? OFFSET ?`,
+        ).bind(familyId, target.mediaId, MESSAGE_PAGE_SIZE + 1, offset)
     : env.DB.prepare(
       `SELECT gm.id, gm.target_type, gm.media_asset_id, gm.target_day, gm.body, gm.created_at,
               gm.author_user_id, u.display_name AS author_display_name,
@@ -965,14 +969,17 @@ async function handleListGalleryMessages(request: Request, env: Env, familyId: s
          JOIN users u ON u.id = gm.author_user_id
         WHERE gm.family_id = ? AND gm.target_type = 'day' AND gm.target_day = ?
         ORDER BY gm.created_at DESC, gm.id DESC
-        LIMIT ?`,
-    ).bind(familyId, target.day, MESSAGE_PAGE_SIZE);
+        LIMIT ? OFFSET ?`,
+        ).bind(familyId, target.day, MESSAGE_PAGE_SIZE + 1, offset);
   const rows = await query.all<GalleryMessageRow>();
   const resultRows = rows.results || [];
+  const pageRows = resultRows.slice(0, MESSAGE_PAGE_SIZE);
   return jsonResponse({
-    messages: resultRows.slice().reverse().map((row) => publicGalleryMessage(row, user.id)),
+    messages: pageRows.slice().reverse().map((row) => publicGalleryMessage(row, user.id)),
     totalCount: resultRows[0]?.total_count ?? 0,
     limit: MESSAGE_PAGE_SIZE,
+    hasMore: resultRows.length > MESSAGE_PAGE_SIZE,
+    nextOffset: offset + pageRows.length,
   });
 }
 

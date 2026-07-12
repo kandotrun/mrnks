@@ -139,9 +139,9 @@ describe('public Worker routes', () => {
     const res = await worker.fetch(new Request('https://mrnks.2-38.com/'), fakeEnv());
     const html = await res.text();
 
-    expect(html).toContain('/vendor/photoswipe/photoswipe.css');
-    expect(html).toContain("import('/vendor/photoswipe/photoswipe-lightbox.esm.js')");
-    expect(html).toContain("pswpModule: () => import('/vendor/photoswipe/photoswipe.esm.js')");
+    expect(html).toContain('/vendor/photoswipe/photoswipe.css?v=5.4.4-2');
+    expect(html).toContain("import('/vendor/photoswipe/photoswipe-lightbox.esm.js?v=5.4.4-2')");
+    expect(html).toContain("pswpModule: () => import('/vendor/photoswipe/photoswipe.esm.js?v=5.4.4-2')");
     expect(html).not.toContain('cdn.jsdelivr.net');
     expect(html).toContain('wheelToZoom: true');
     expect(html).toContain('pinchToClose: true');
@@ -162,6 +162,10 @@ describe('public Worker routes', () => {
     expect(html).toContain("lightbox.on('contentDeactivate'");
     expect(html).toContain('rememberPreviewDimensions(item, media)');
     expect(html).toContain('resolvePreviewDimensions');
+    expect(html).toContain('function hasPhotoSwipeLayoutStyles()');
+    expect(html).toContain("styles.position === 'fixed'");
+    expect(html).toContain("document.body.classList.add('viewer-open')");
+    expect(html).toContain("document.body.classList.remove('viewer-open')");
     expect(html).toContain('openLegacyGalleryItem');
     expect(html).toContain('プレビューを読み込めなかったため、簡易表示に切り替えました');
   });
@@ -175,12 +179,14 @@ describe('public Worker routes', () => {
     expect(html).toContain('id="messageBody"');
     expect(html).toContain('maxlength="500"');
     expect(html).toContain('id="messageList"');
+    expect(html).toContain('id="messageLoadMoreButton"');
     expect(html).toContain('この日にメッセージ');
     expect(html).toContain('openDayMessages(group, messageButton)');
     expect(html).toContain("name: 'media-messages'");
     expect(html).toContain("ariaLabel: 'この写真・動画のメッセージを開く'");
     expect(html).toContain('openMediaMessages(item, element)');
-    expect(html).toContain('state.messageViewer.options.trapFocus = false');
+    expect(html).not.toContain('state.messageViewer.options.trapFocus = false');
+    expect(html).toContain('await closeMediaViewerForDialog()');
     expect(html).toContain("event.key !== 'Escape' || !$('messageDialog').open");
     expect(html).toContain('event.stopImmediatePropagation()');
     expect(html).toContain('id="galleryMessageButton"');
@@ -188,6 +194,9 @@ describe('public Worker routes', () => {
     expect(html).toContain("'/api/families/' + encodeURIComponent(state.familyId) + '/messages'");
     expect(html).toContain('body.textContent = message.body');
     expect(html).toContain("author.textContent = message.author?.displayName || '家族'");
+    expect(html).toContain('function mergeMessagesById');
+    expect(html).toContain('mergeMessagesById(data.messages || [], state.messages)');
+    expect(html).toContain('loadMessages(state.messageTarget, false)');
     expect(html).toContain('state.messageReturnFocus?.focus()');
   });
 

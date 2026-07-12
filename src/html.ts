@@ -7,7 +7,7 @@ export function renderAppHtml(): string {
   <title>まるのこし</title>
   <meta name="description" content="家族の写真と動画を、画質ごと残すLINEアルバム" />
   <meta name="theme-color" content="#f7f8f6" />
-  <link rel="stylesheet" href="/vendor/photoswipe/photoswipe.css" />
+  <link rel="stylesheet" href="/vendor/photoswipe/photoswipe.css?v=5.4.4-2" />
   <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
   <style>
     :root {
@@ -818,6 +818,11 @@ export function renderAppHtml(): string {
     }
     .fab:hover, .fab:focus-visible { background: var(--app-accent-strong); transform: translateY(-2px); }
     .fab:active { transform: translateY(0); }
+    body.viewer-open .fab {
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+    }
     .status-toast {
       position: fixed;
       top: calc(76px + env(safe-area-inset-top));
@@ -951,7 +956,7 @@ export function renderAppHtml(): string {
       flex-direction: column;
     }
     .message-context {
-      margin: -10px 0 14px;
+      margin: -10px 0 8px;
       padding: 10px 12px;
       overflow: hidden;
       border-radius: 10px;
@@ -962,6 +967,8 @@ export function renderAppHtml(): string {
       text-overflow: ellipsis;
       white-space: nowrap;
     }
+    .message-history { margin: 0 0 8px; text-align: center; }
+    .message-history .secondary-action { padding: 7px 14px; font-size: 12px; }
     .message-list {
       display: grid;
       min-height: 0;
@@ -1301,6 +1308,9 @@ export function renderAppHtml(): string {
       <button id="messageCloseButton" class="sheet-close" type="button" aria-label="メッセージを閉じる">×</button>
     </header>
     <p id="messageContext" class="message-context"></p>
+    <div class="message-history">
+      <button id="messageLoadMoreButton" class="secondary-action" type="button" hidden>以前のメッセージを表示</button>
+    </div>
     <div id="messageList" class="message-list" aria-live="polite" aria-busy="false"></div>
     <form id="messageForm" class="message-form">
       <label class="visually-hidden" for="messageBody">メッセージ本文</label>
@@ -1387,10 +1397,12 @@ const state = {
   messageTarget: null,
   messages: [],
   messageLoading: false,
+  messageLoadingMore: false,
+  messageOffset: 0,
+  messageHasMore: false,
   messageSubmitting: false,
   messageReturnFocus: null,
   messageRequestSequence: 0,
-  messageViewer: null,
   reopenViewerAfterMessageDialogId: null,
 };
 const $ = (id) => document.getElementById(id);
@@ -1756,10 +1768,12 @@ async function logout() {
   state.trashHasMore = false;
   state.messageTarget = null;
   state.messages = [];
+  state.messageLoading = false;
+  state.messageLoadingMore = false;
+  state.messageOffset = 0;
+  state.messageHasMore = false;
   state.messageRequestSequence += 1;
   state.messageReturnFocus = null;
-  if (state.messageViewer?.options) state.messageViewer.options.trapFocus = true;
-  state.messageViewer = null;
   state.reopenViewerAfterMessageDialogId = null;
   toggleUserMenu(false);
   closeDialog($('messageDialog'));
@@ -1981,11 +1995,31 @@ function formatMessageTime(value) {
   }).format(date);
 }
 
-function renderMessages() {
+function mergeMessagesById(...messageGroups) {
+  const messagesById = new Map();
+  for (const group of messageGroups) {
+    for (const message of group || []) {
+      if (message?.id) messagesById.set(message.id, message);
+    }
+  }
+  return [...messagesById.values()].sort((left, right) => {
+    const timeDifference = new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime();
+    if (Number.isFinite(timeDifference) && timeDifference !== 0) return timeDifference;
+    return String(left.id).localeCompare(String(right.id));
+  });
+}
+
+function renderMessages(scrollMode = 'none') {
   const root = $('messageList');
+  const previousHeight = root.scrollHeight;
+  const previousTop = root.scrollTop;
   root.replaceChildren();
-  root.setAttribute('aria-busy', String(state.messageLoading));
-  if (state.messageLoading) {
+  root.setAttribute('aria-busy', String(state.messageLoading || state.messageLoadingMore));
+  const loadMoreButton = $('messageLoadMoreButton');
+  loadMoreButton.hidden = !state.messageHasMore;
+  loadMoreButton.disabled = state.messageLoadingMore;
+  loadMoreButton.textContent = state.messageLoadingMore ? '読み込み中...' : '以前のメッセージを表示';
+  if (state.messageLoading && !state.messages.length) {
     const loading = document.createElement('div');
     loading.className = 'message-empty';
     loading.textContent = 'メッセージを読み込んでいます...';
@@ -2042,7 +2076,10 @@ function renderMessages() {
     article.append(avatar, copy);
     root.appendChild(article);
   }
-  window.requestAnimationFrame(() => { root.scrollTop = root.scrollHeight; });
+  window.requestAnimationFrame(() => {
+    if (scrollMode === 'bottom') root.scrollTop = root.scrollHeight;
+    if (scrollMode === 'preserve') root.scrollTop = previousTop + (root.scrollHeight - previousHeight);
+  });
 }
 
 function updateMessageComposer() {
@@ -2061,27 +2098,33 @@ function setMessageSubmitting(submitting) {
   updateMessageComposer();
 }
 
-function messageSearchParams(target) {
-  const params = new URLSearchParams({ targetType: target.targetType });
+function messageSearchParams(target, offset = 0) {
+  const params = new URLSearchParams({ targetType: target.targetType, offset: String(offset) });
   if (target.targetType === 'media') params.set('mediaId', target.mediaId);
   else params.set('day', target.day);
   return params;
 }
 
-async function loadMessages(target) {
+async function loadMessages(target, reset = true) {
+  if (state.messageLoading || state.messageLoadingMore) return;
   const requestSequence = ++state.messageRequestSequence;
-  state.messageLoading = true;
+  const offset = reset ? 0 : state.messageOffset;
+  if (reset) state.messageLoading = true;
+  else state.messageLoadingMore = true;
   renderMessages();
   const path = '/api/families/' + encodeURIComponent(state.familyId) + '/messages?'
-    + messageSearchParams(target).toString();
+    + messageSearchParams(target, offset).toString();
   try {
     const data = await api(path);
     if (requestSequence !== state.messageRequestSequence || messageTargetKey(state.messageTarget) !== messageTargetKey(target)) return;
-    state.messages = data.messages || [];
+    state.messages = mergeMessagesById(data.messages || [], state.messages);
+    state.messageOffset = Number.isInteger(data.nextOffset) ? data.nextOffset : offset + (data.messages || []).length;
+    state.messageHasMore = Boolean(data.hasMore);
   } finally {
     if (requestSequence === state.messageRequestSequence && messageTargetKey(state.messageTarget) === messageTargetKey(target)) {
       state.messageLoading = false;
-      renderMessages();
+      state.messageLoadingMore = false;
+      renderMessages(reset ? 'bottom' : 'preserve');
     }
   }
 }
@@ -2089,16 +2132,19 @@ async function loadMessages(target) {
 async function showMessageDialog(target, context, trigger) {
   state.messageTarget = target;
   state.messages = [];
+  state.messageOffset = 0;
+  state.messageHasMore = false;
+  state.messageLoading = false;
+  state.messageLoadingMore = false;
   state.messageReturnFocus = trigger instanceof HTMLElement ? trigger : null;
-  state.messageLoading = true;
   $('messageTitle').textContent = target.targetType === 'media' ? '写真・動画へのメッセージ' : 'この日のメッセージ';
   $('messageContext').textContent = context;
   $('messageBody').value = '';
   setMessageSubmitting(false);
-  renderMessages();
+  const loading = loadMessages(target, true);
   openDialog($('messageDialog'));
   window.setTimeout(() => $('messageBody').focus(), 0);
-  await loadMessages(target);
+  await loading;
 }
 
 async function openDayMessages(group, messageButton) {
@@ -2109,14 +2155,31 @@ async function openDayMessages(group, messageButton) {
   );
 }
 
+async function closeMediaViewerForDialog() {
+  const pswp = mediaViewer?.pswp;
+  if (!pswp) return;
+  await new Promise((resolve) => {
+    let resolved = false;
+    const finish = () => {
+      if (resolved) return;
+      resolved = true;
+      pswp.off('destroy', finish);
+      resolve();
+    };
+    pswp.on('destroy', finish);
+    pswp.close();
+    window.setTimeout(finish, 400);
+  });
+}
+
 async function openMediaMessages(item, element) {
   if (mediaViewer?.pswp) {
-    state.messageViewer = mediaViewer.pswp;
-    state.messageViewer.options.trapFocus = false;
+    state.reopenViewerAfterMessageDialogId = item.id;
+    await closeMediaViewerForDialog();
     await showMessageDialog(
       { targetType: 'media', mediaId: item.id },
       item.originalFilename,
-      element,
+      null,
     );
     return;
   }
@@ -2161,9 +2224,9 @@ async function submitMessage(event) {
       }),
     });
     if (messageTargetKey(state.messageTarget) === messageTargetKey(target)) {
-      state.messages.push(data.message);
+      state.messages = mergeMessagesById([data.message], state.messages);
       $('messageBody').value = '';
-      renderMessages();
+      renderMessages('bottom');
       status('メッセージを残しました');
     }
   } finally {
@@ -2538,6 +2601,10 @@ function updateViewerCaption(element, pswp) {
 }
 
 function configureMediaViewer(lightbox) {
+  lightbox.on('beforeOpen', () => {
+    document.body.classList.add('viewer-open');
+  });
+
   lightbox.on('uiRegister', () => {
     const pswp = lightbox.pswp;
     if (!pswp) return;
@@ -2664,6 +2731,7 @@ function configureMediaViewer(lightbox) {
   });
 
   lightbox.on('destroy', () => {
+    document.body.classList.remove('viewer-open');
     if (viewerDeleteRequestId) {
       const assetId = viewerDeleteRequestId;
       viewerDeleteRequestId = null;
@@ -2676,15 +2744,29 @@ function configureMediaViewer(lightbox) {
   });
 }
 
+function hasPhotoSwipeLayoutStyles() {
+  const probe = document.createElement('div');
+  probe.className = 'pswp';
+  probe.setAttribute('aria-hidden', 'true');
+  probe.style.visibility = 'hidden';
+  document.body.appendChild(probe);
+  const styles = window.getComputedStyle(probe);
+  const zIndex = Number.parseInt(styles.zIndex, 10);
+  const ready = styles.position === 'fixed' && Number.isFinite(zIndex) && zIndex >= 1000;
+  probe.remove();
+  return ready;
+}
+
 async function ensureMediaViewer() {
+  if (!hasPhotoSwipeLayoutStyles()) throw new Error('PhotoSwipe stylesheet is unavailable');
   if (mediaViewer) return mediaViewer;
   if (!mediaViewerPromise) {
-    mediaViewerPromise = import('/vendor/photoswipe/photoswipe-lightbox.esm.js')
+    mediaViewerPromise = import('/vendor/photoswipe/photoswipe-lightbox.esm.js?v=5.4.4-2')
       .then((module) => {
         const PhotoSwipeLightbox = module.default;
         const lightbox = new PhotoSwipeLightbox({
           dataSource: [],
-          pswpModule: () => import('/vendor/photoswipe/photoswipe.esm.js'),
+          pswpModule: () => import('/vendor/photoswipe/photoswipe.esm.js?v=5.4.4-2'),
           bgOpacity: .96,
           spacing: .08,
           loop: true,
@@ -2799,6 +2881,7 @@ function openLegacyGalleryItem(assetId) {
   $('galleryNextButton').disabled = state.assets.length < 2;
   $('galleryDeleteButton').hidden = !state.canUpload;
 
+  document.body.classList.add('viewer-open');
   const dialog = $('galleryDialog');
   if (!dialog.open) {
     if (typeof dialog.showModal === 'function') dialog.showModal();
@@ -2834,7 +2917,10 @@ function closeGallery() {
   if (mediaViewer?.pswp) mediaViewer.pswp.close();
   const dialog = $('galleryDialog');
   if (dialog.open && typeof dialog.close === 'function') dialog.close();
-  else dialog.removeAttribute('open');
+  else {
+    dialog.removeAttribute('open');
+    if (!mediaViewer?.pswp) document.body.classList.remove('viewer-open');
+  }
 }
 
 async function loadMedia(reset = true) {
@@ -2900,6 +2986,9 @@ $('groupSetupPanel').addEventListener('click', (event) => {
 $('loadMediaButton').addEventListener('click', () => loadMedia(true).catch((e) => status('ERROR: ' + e.message)));
 $('loadMoreMediaButton').addEventListener('click', () => loadMedia(false).catch((e) => status('ERROR: ' + e.message)));
 $('messageCloseButton').addEventListener('click', closeMessageDialog);
+$('messageLoadMoreButton').addEventListener('click', () => {
+  if (state.messageTarget) loadMessages(state.messageTarget, false).catch((error) => status('ERROR: ' + error.message));
+});
 $('messageBody').addEventListener('input', updateMessageComposer);
 $('messageBody').addEventListener('keydown', (event) => {
   if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
@@ -2927,10 +3016,11 @@ $('messageDialog').addEventListener('close', () => {
   state.messageTarget = null;
   state.messages = [];
   state.messageLoading = false;
+  state.messageLoadingMore = false;
+  state.messageOffset = 0;
+  state.messageHasMore = false;
   $('messageBody').value = '';
   updateMessageComposer();
-  if (state.messageViewer?.options) state.messageViewer.options.trapFocus = true;
-  state.messageViewer = null;
   const reopenAssetId = state.reopenViewerAfterMessageDialogId;
   state.reopenViewerAfterMessageDialogId = null;
   if (reopenAssetId && state.assets.some((asset) => asset.id === reopenAssetId)) {
@@ -2981,6 +3071,7 @@ $('galleryDialog').addEventListener('click', (event) => {
   if (event.target === $('galleryDialog')) closeGallery();
 });
 $('galleryDialog').addEventListener('close', () => {
+  document.body.classList.remove('viewer-open');
   clearGalleryStage();
   state.activeAssetId = null;
 });

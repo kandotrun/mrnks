@@ -205,4 +205,50 @@ describe('gallery messages', () => {
     expect(restored.status).toBe(200);
     await expect(restored.json()).resolves.toMatchObject({ messages: [{ body: '残しておく' }] });
   });
+
+  it('paginates older messages instead of making history beyond 100 items unreachable', async () => {
+    const env = createMessageEnv('viewer');
+    const db = databases.at(-1)!;
+    const insert = db.prepare(`
+      INSERT INTO gallery_messages (
+        id, family_id, author_user_id, target_type, media_asset_id, target_day, body, created_at
+      ) VALUES (?, 'fam_1', 'usr_1', 'day', NULL, '2026-07-12', ?, ?)
+    `);
+    const base = Date.parse('2026-07-12T00:00:00.000Z');
+    for (let index = 0; index < 101; index += 1) {
+      insert.run(
+        `msg_page_${String(index).padStart(3, '0')}`,
+        `message-${index}`,
+        new Date(base + (index * 1000)).toISOString(),
+      );
+    }
+
+    const first = await worker.fetch(new Request(
+      'https://mrnks.2-38.com/api/families/fam_1/messages?targetType=day&day=2026-07-12&offset=0',
+      { headers: { cookie: 'mrnks_session=test-token' } },
+    ), env);
+    expect(first.status).toBe(200);
+    const firstPage = await first.json() as {
+      messages: Array<{ body: string }>;
+      totalCount: number;
+      nextOffset: number;
+      hasMore: boolean;
+    };
+    expect(firstPage.messages).toHaveLength(100);
+    expect(firstPage.messages[0]?.body).toBe('message-1');
+    expect(firstPage.messages.at(-1)?.body).toBe('message-100');
+    expect(firstPage).toMatchObject({ totalCount: 101, nextOffset: 100, hasMore: true });
+
+    const older = await worker.fetch(new Request(
+      'https://mrnks.2-38.com/api/families/fam_1/messages?targetType=day&day=2026-07-12&offset=100',
+      { headers: { cookie: 'mrnks_session=test-token' } },
+    ), env);
+    expect(older.status).toBe(200);
+    await expect(older.json()).resolves.toMatchObject({
+      messages: [{ body: 'message-0' }],
+      totalCount: 101,
+      nextOffset: 101,
+      hasMore: false,
+    });
+  });
 });
