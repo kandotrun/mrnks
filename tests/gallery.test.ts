@@ -337,6 +337,64 @@ function fakeGalleryEnv(
   };
 }
 
+interface UploadInitCapture {
+  runs: Array<{ sql: string; values: unknown[] }>;
+}
+
+function fakeUploadInitEnv(
+  role: 'owner' | 'admin' | 'uploader' | 'viewer',
+  capture: UploadInitCapture,
+): Env {
+  const db = {
+    prepare(sql: string) {
+      return {
+        bind(...values: unknown[]) {
+          return {
+            async first<T>() {
+              if (sql.includes('FROM sessions s')) {
+                return {
+                  id: 'usr_1',
+                  display_name: 'Kan',
+                  picture_url: null,
+                  expires_at: new Date(Date.now() + 60_000).toISOString(),
+                  line_group_binding_id: null,
+                } as T;
+              }
+              return null;
+            },
+            async all<T>() {
+              if (sql.includes('FROM family_members fm')) {
+                return { results: [{ id: 'fam_1', name: '家族', role }] as T[] };
+              }
+              return { results: [] as T[] };
+            },
+            async run() {
+              capture.runs.push({ sql, values });
+              return { success: true, meta: { changes: 1 } };
+            },
+          };
+        },
+      };
+    },
+  } as unknown as D1Database;
+
+  return {
+    ENVIRONMENT: 'test',
+    APP_ORIGIN: 'https://mrnks.2-38.com',
+    LINE_LIFF_ID: 'test-liff-id',
+    LINE_LOGIN_CHANNEL_ID: 'login-channel',
+    LINE_LOGIN_CHANNEL_SECRET: 'login-secret',
+    LINE_MESSAGING_CHANNEL_ID: 'messaging-channel',
+    LINE_MESSAGING_CHANNEL_SECRET: 'messaging-secret',
+    LINE_MESSAGING_CHANNEL_ACCESS_TOKEN: 'messaging-token',
+    SESSION_SECRET: 'test-session-secret',
+    NAS_STORAGE_ORIGIN: 'https://upload.mrnks.2-38.com',
+    NAS_STORAGE_SECRET: 'test-nas-secret',
+    DB: db,
+    MEDIA_BUCKET: {} as R2Bucket,
+  } as unknown as Env;
+}
+
 interface DeleteCapture {
   deletedKeys: string[];
   runs: Array<{ sql: string; values: unknown[] }>;
@@ -441,6 +499,49 @@ function fakeDeleteEnv(
 }
 
 describe('gallery and RAW previews', () => {
+  it.each(['owner', 'admin', 'uploader'] as const)(
+    'spec: %s can initiate a signed NAS upload without sending original bytes through the Worker',
+    async (role) => {
+      const capture: UploadInitCapture = { runs: [] };
+      const response = await worker.fetch(new Request('https://mrnks.2-38.com/api/families/fam_1/uploads', {
+        method: 'POST',
+        headers: {
+          cookie: 'mrnks_session=session-token',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          filename: 'DSC00001.ARW',
+          mimeType: 'image/x-sony-arw',
+          sizeBytes: 45_000_000,
+          clientLastModifiedAt: '2026-07-12T01:02:03.000Z',
+        }),
+      }), fakeUploadInitEnv(role, capture));
+
+      expect(response.status).toBe(201);
+      const body = await response.json() as Record<string, unknown>;
+      expect(body.gatewayOrigin).toBe('https://upload.mrnks.2-38.com');
+      expect(body.chunkSizeBytes).toBe(32 * 1024 * 1024);
+      expect(body.uploadToken).toEqual(expect.any(String));
+      expect(body.uploadId).toEqual(expect.any(String));
+      expect(capture.runs.some(({ sql }) => sql.includes('INSERT INTO media_upload_sessions'))).toBe(true);
+    },
+  );
+
+  it('spec: viewer cannot initiate a NAS upload', async () => {
+    const capture: UploadInitCapture = { runs: [] };
+    const response = await worker.fetch(new Request('https://mrnks.2-38.com/api/families/fam_1/uploads', {
+      method: 'POST',
+      headers: {
+        cookie: 'mrnks_session=session-token',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ filename: 'photo.jpg', mimeType: 'image/jpeg', sizeBytes: 1234 }),
+    }), fakeUploadInitEnv('viewer', capture));
+
+    expect(response.status).toBe(403);
+    expect(capture.runs).toHaveLength(0);
+  });
+
   it('selects a gallery-sized embedded JPEG instead of the full-resolution DNG preview', async () => {
     expect(parser).toBeTypeOf('function');
     expect(await parser?.(createDngHeaderFixture())).toEqual({

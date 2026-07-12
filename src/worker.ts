@@ -31,6 +31,8 @@ export interface Env {
   LINE_MESSAGING_CHANNEL_SECRET: string;
   LINE_MESSAGING_CHANNEL_ACCESS_TOKEN: string;
   SESSION_SECRET: string;
+  NAS_STORAGE_ORIGIN?: string;
+  NAS_STORAGE_SECRET?: string;
   DB: D1Database;
   MEDIA_BUCKET: R2Bucket;
 }
@@ -92,6 +94,9 @@ const DOWNLOAD_TTL_SECONDS = 60 * 10;
 const LINE_PREVIEW_MAX_BYTES = 1_000_000;
 const MEDIA_PAGE_SIZE = 60;
 const MAX_MEDIA_OFFSET = 1_000_000;
+const NAS_UPLOAD_CHUNK_BYTES = 32 * 1024 * 1024;
+const NAS_UPLOAD_MAX_BYTES = 8 * 1024 * 1024 * 1024;
+const NAS_UPLOAD_TTL_SECONDS = 60 * 60;
 const BROWSER_IMAGE_MIME_TYPES = new Set([
   'image/jpeg',
   'image/png',
@@ -153,6 +158,11 @@ async function route(request: Request, env: Env, ctx?: ExecutionContext): Promis
   const pendingLineGroupMatch = path.match(/^\/api\/line-groups\/pending\/([^/]+)$/);
   if (pendingLineGroupMatch && request.method === 'GET') {
     return handlePendingLineGroup(request, env, decodeURIComponent(pendingLineGroupMatch[1]));
+  }
+
+  const familyUploadMatch = path.match(/^\/api\/families\/([^/]+)\/uploads$/);
+  if (familyUploadMatch && request.method === 'POST') {
+    return handleCreateNasUpload(request, env, decodeURIComponent(familyUploadMatch[1]));
   }
 
   const familyMediaMatch = path.match(/^\/api\/families\/([^/]+)\/media$/);
@@ -254,6 +264,87 @@ async function handleSession(request: Request, env: Env): Promise<Response> {
 
 function handleLogout(): Response {
   return jsonResponse({ ok: true }, { headers: { 'set-cookie': clearSessionCookie() } });
+}
+
+async function handleCreateNasUpload(request: Request, env: Env, familyId: string): Promise<Response> {
+  const user = await requireUser(request, env);
+  await requireFamilyRole(user, familyId, ['owner', 'admin', 'uploader']);
+  if (!env.NAS_STORAGE_ORIGIN || !env.NAS_STORAGE_SECRET) {
+    throw new HttpError(503, 'nas_storage_unavailable');
+  }
+
+  const body = await request.json().catch(() => null) as {
+    filename?: unknown;
+    mimeType?: unknown;
+    sizeBytes?: unknown;
+    clientLastModifiedAt?: unknown;
+  } | null;
+  const filename = typeof body?.filename === 'string' ? body.filename.normalize('NFC').trim() : '';
+  const sizeBytes = typeof body?.sizeBytes === 'number' ? body.sizeBytes : Number.NaN;
+  if (!filename || filename.length > 255 || /[\u0000-\u001f\u007f]/.test(filename)) {
+    throw new HttpError(400, 'invalid_file_name');
+  }
+  if (!Number.isSafeInteger(sizeBytes) || sizeBytes <= 0) throw new HttpError(400, 'invalid_file_size');
+  if (sizeBytes > NAS_UPLOAD_MAX_BYTES) throw new HttpError(413, 'file_too_large');
+
+  const suppliedMimeType = typeof body?.mimeType === 'string' ? body.mimeType : '';
+  const mimeType = normalizeMediaMimeType(filename, suppliedMimeType);
+  const clientLastModifiedAt = typeof body?.clientLastModifiedAt === 'string'
+    && Number.isFinite(Date.parse(body.clientLastModifiedAt))
+    ? new Date(body.clientLastModifiedAt).toISOString()
+    : null;
+  const createdAt = nowIso();
+  const expiresAt = new Date(Date.now() + NAS_UPLOAD_TTL_SECONDS * 1000).toISOString();
+  const uploadId = randomId('upl');
+  const assetId = randomId('ast');
+  const extensionMatch = filename.match(/\.([a-z0-9]{1,10})$/i);
+  const extension = extensionMatch ? `.${extensionMatch[1].toLowerCase()}` : '';
+  const storageKey = `originals/${familyId}/${assetId}/original${extension}`;
+  const totalParts = Math.ceil(sizeBytes / NAS_UPLOAD_CHUNK_BYTES);
+
+  await env.DB.prepare(
+    `INSERT INTO media_upload_sessions (
+      id, asset_id, family_id, uploader_user_id, original_filename, original_mime_type,
+      original_size_bytes, original_storage_key, client_last_modified_at,
+      status, created_at, expires_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'uploading', ?, ?)`,
+  ).bind(
+    uploadId,
+    assetId,
+    familyId,
+    user.id,
+    filename,
+    mimeType,
+    sizeBytes,
+    storageKey,
+    clientLastModifiedAt,
+    createdAt,
+    expiresAt,
+  ).run();
+
+  const uploadToken = await signNasToken({
+    v: 1,
+    action: 'upload',
+    uploadId,
+    assetId,
+    familyId,
+    key: storageKey,
+    sizeBytes,
+    chunkSizeBytes: NAS_UPLOAD_CHUNK_BYTES,
+    totalParts,
+    origin: getOrigin(request, env.APP_ORIGIN),
+    exp: Math.floor(Date.parse(expiresAt) / 1000),
+  }, env.NAS_STORAGE_SECRET);
+
+  return jsonResponse({
+    uploadId,
+    assetId,
+    gatewayOrigin: env.NAS_STORAGE_ORIGIN.replace(/\/$/, ''),
+    chunkSizeBytes: NAS_UPLOAD_CHUNK_BYTES,
+    totalParts,
+    uploadToken,
+    expiresAt,
+  }, { status: 201 });
 }
 
 async function handleUploadMedia(
@@ -1221,6 +1312,25 @@ function mediaTypeFromMime(mimeType: string): 'image' | 'video' | 'other' {
 
 async function hashSecretToken(token: string, secret: string): Promise<string> {
   return sha256Hex(`${secret}:${token}`);
+}
+
+function base64UrlEncode(bytes: Uint8Array): string {
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+async function signNasToken(payload: Record<string, unknown>, secret: string): Promise<string> {
+  const encodedPayload = base64UrlEncode(new TextEncoder().encode(JSON.stringify(payload)));
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  );
+  const signature = new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(encodedPayload)));
+  return `${encodedPayload}.${base64UrlEncode(signature)}`;
 }
 
 async function pushLineMessages(
