@@ -6,7 +6,7 @@ export function renderAppHtml(): string {
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>まるのこし</title>
   <meta name="description" content="家族の写真と動画を、画質ごと残すLINEアルバム" />
-  <meta name="theme-color" content="#f5f5f5" />
+  <meta name="theme-color" content="#f7f8f6" />
   <script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
   <style>
     :root {
@@ -543,54 +543,421 @@ export function renderAppHtml(): string {
       .gallery-nav-prev { left: max(4px, env(safe-area-inset-left)); }
       .gallery-nav-next { right: max(4px, env(safe-area-inset-right)); }
     }
+    /* Gallery-first application shell */
+    [hidden] { display: none !important; }
+    :root {
+      --app-bg: #f7f8f6;
+      --app-surface: #ffffff;
+      --app-text: #18211b;
+      --app-muted: #68716b;
+      --app-line: #e4e8e4;
+      --app-accent: #16834a;
+      --app-accent-strong: #0e6b3b;
+      --app-accent-soft: #e8f5ed;
+      --app-shadow: 0 18px 50px rgba(24, 33, 27, .14);
+    }
+    body {
+      min-height: 100vh;
+      color: var(--app-text);
+      background: var(--app-bg);
+      font-family: "Avenir Next", Avenir, "Hiragino Sans", "Yu Gothic", Meiryo, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    body:has(dialog[open]) { overflow: hidden; }
+    button { -webkit-tap-highlight-color: transparent; }
+    .auth-gate {
+      min-height: 100vh;
+      min-height: 100svh;
+      display: grid;
+      place-items: center;
+      padding: max(32px, env(safe-area-inset-top)) 24px max(32px, env(safe-area-inset-bottom));
+      background:
+        radial-gradient(circle at 50% 20%, rgba(22, 131, 74, .11), transparent 34%),
+        var(--app-bg);
+    }
+    .auth-card {
+      width: min(100%, 390px);
+      text-align: center;
+    }
+    .auth-mark {
+      display: grid;
+      width: 64px;
+      height: 64px;
+      margin: 0 auto 22px;
+      border: 1px solid rgba(22, 131, 74, .22);
+      border-radius: 18px;
+      place-items: center;
+      color: #ffffff;
+      background: var(--app-accent);
+      box-shadow: 0 14px 30px rgba(22, 131, 74, .24);
+      font-size: 28px;
+      font-weight: 800;
+      letter-spacing: -.08em;
+    }
+    .auth-card h1 {
+      margin: 0;
+      font-size: clamp(30px, 8vw, 38px);
+      font-weight: 750;
+      line-height: 1.15;
+      letter-spacing: -.04em;
+    }
+    .auth-lead {
+      margin: 14px auto 28px;
+      color: var(--app-muted);
+      font-size: 15px;
+      line-height: 1.8;
+    }
+    .primary-action, .secondary-action, .quiet-action {
+      min-height: 46px;
+      padding: 11px 18px;
+      border: 0;
+      border-radius: 12px;
+      cursor: pointer;
+      font-weight: 700;
+      line-height: 1.3;
+    }
+    .primary-action {
+      color: #ffffff;
+      background: var(--app-accent);
+      box-shadow: 0 8px 20px rgba(22, 131, 74, .2);
+    }
+    .primary-action:hover, .primary-action:focus-visible { background: var(--app-accent-strong); }
+    .primary-action:disabled { opacity: .48; cursor: not-allowed; box-shadow: none; }
+    .secondary-action { color: var(--app-text); background: #eef1ee; }
+    .secondary-action:hover, .secondary-action:focus-visible { background: #e4e9e5; }
+    .quiet-action {
+      min-height: 40px;
+      padding: 8px 12px;
+      color: var(--app-muted);
+      background: transparent;
+    }
+    .quiet-action:hover, .quiet-action:focus-visible { color: var(--app-text); background: #edf0ed; }
+    .auth-login-button { width: 100%; }
+    .auth-note { margin: 16px 0 0; color: #8a928d; font-size: 12px; line-height: 1.7; }
+    .app-header {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      border-bottom: 1px solid rgba(228, 232, 228, .9);
+      background: rgba(255, 255, 255, .9);
+      backdrop-filter: blur(18px);
+      -webkit-backdrop-filter: blur(18px);
+    }
+    .app-header-inner {
+      display: flex;
+      width: min(100%, 1240px);
+      min-height: 64px;
+      margin: 0 auto;
+      padding: 0 20px;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    .app-brand {
+      color: var(--app-text);
+      font-size: 19px;
+      font-weight: 800;
+      letter-spacing: -.03em;
+    }
+    .app-brand:hover, .app-brand:focus { color: var(--app-text); text-decoration: none; }
+    .user-menu-wrap { position: relative; }
+    .user-menu-button {
+      display: grid;
+      width: 44px;
+      height: 44px;
+      padding: 0;
+      overflow: hidden;
+      border: 1px solid #d9dfda;
+      border-radius: 50%;
+      place-items: center;
+      color: var(--app-accent-strong);
+      background: var(--app-accent-soft);
+      cursor: pointer;
+      font-weight: 800;
+    }
+    .user-menu-button:hover, .user-menu-button:focus-visible { border-color: var(--app-accent); }
+    .user-avatar-image { width: 100%; height: 100%; object-fit: cover; }
+    .user-menu-popover {
+      position: absolute;
+      top: calc(100% + 10px);
+      right: 0;
+      z-index: 30;
+      width: min(300px, calc(100vw - 32px));
+      padding: 14px;
+      border: 1px solid var(--app-line);
+      border-radius: 16px;
+      background: #ffffff;
+      box-shadow: var(--app-shadow);
+    }
+    .user-menu-name { margin: 0; font-size: 15px; font-weight: 750; line-height: 1.5; }
+    .user-menu-meta { margin: 3px 0 12px; color: var(--app-muted); font-size: 12px; line-height: 1.5; }
+    .user-menu-actions { display: grid; gap: 8px; }
+    .gallery-main {
+      width: min(100%, 1240px);
+      margin: 0 auto;
+      padding: 28px 20px max(120px, calc(88px + env(safe-area-inset-bottom)));
+    }
+    .gallery-heading {
+      display: flex;
+      margin-bottom: 22px;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    .gallery-heading h1 {
+      margin: 0;
+      font-size: clamp(24px, 4vw, 32px);
+      font-weight: 760;
+      line-height: 1.2;
+      letter-spacing: -.04em;
+    }
+    .gallery-summary { margin: 6px 0 0; color: var(--app-muted); font-size: 13px; }
+    .album-count { color: inherit; background: transparent; padding: 0; font-size: inherit; font-weight: 700; }
+    .gallery-days { display: grid; gap: 30px; }
+    .gallery-day-heading {
+      position: sticky;
+      top: 64px;
+      z-index: 5;
+      margin: 0 0 10px;
+      padding: 10px 0 8px;
+      border: 0;
+      background: rgba(247, 248, 246, .92);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+    }
+    .gallery-day-heading h3 { color: var(--app-text); font-size: 14px; font-weight: 750; }
+    .gallery-day-heading .muted { color: var(--app-muted); font-size: 12px; }
+    .gallery-grid { grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 5px; }
+    .gallery-item {
+      border: 0;
+      border-radius: 8px;
+      background: #e6eae7;
+      box-shadow: none;
+    }
+    .gallery-item:hover, .gallery-item:focus { border: 0; filter: brightness(.96); }
+    .gallery-item:focus-visible { outline: 3px solid rgba(22, 131, 74, .45); outline-offset: 2px; }
+    .gallery-placeholder { color: #657068; background: #e6eae7; font-size: 11px; }
+    .gallery-badge { top: 7px; left: 7px; border-radius: 4px; box-shadow: none; }
+    .gallery-more { margin-top: 28px; }
+    .empty-gallery {
+      min-height: 44vh;
+      display: grid;
+      padding: 42px 24px;
+      border: 1px dashed #cfd6d0;
+      border-radius: 18px;
+      place-items: center;
+      color: var(--app-muted);
+      text-align: center;
+    }
+    .empty-gallery strong { display: block; margin-bottom: 7px; color: var(--app-text); font-size: 17px; }
+    .footer-note { margin: 34px 0 0; color: #929a95; }
+    .fab {
+      position: fixed;
+      right: max(22px, env(safe-area-inset-right));
+      bottom: max(22px, calc(14px + env(safe-area-inset-bottom)));
+      z-index: 24;
+      display: grid;
+      width: 60px;
+      height: 60px;
+      padding: 0 0 3px;
+      border: 0;
+      border-radius: 50%;
+      place-items: center;
+      color: #ffffff;
+      background: var(--app-accent);
+      box-shadow: 0 14px 30px rgba(22, 131, 74, .34);
+      cursor: pointer;
+      font-size: 36px;
+      font-weight: 300;
+      line-height: 1;
+    }
+    .fab:hover, .fab:focus-visible { background: var(--app-accent-strong); transform: translateY(-2px); }
+    .fab:active { transform: translateY(0); }
+    .status-toast {
+      position: fixed;
+      top: calc(76px + env(safe-area-inset-top));
+      left: 50%;
+      z-index: 60;
+      width: min(calc(100vw - 32px), 560px);
+      min-height: 0;
+      margin: 0;
+      padding: 11px 14px;
+      transform: translateX(-50%);
+      overflow: visible;
+      border: 1px solid #cfd8d1;
+      border-radius: 12px;
+      color: var(--app-text);
+      background: rgba(255, 255, 255, .96);
+      box-shadow: 0 10px 30px rgba(24, 33, 27, .16);
+      font-family: inherit;
+      font-size: 13px;
+      line-height: 1.55;
+      white-space: pre-wrap;
+    }
+    .status-toast[data-tone="error"] { border-color: #efb9b9; color: #8f2525; background: #fff6f6; }
+    .upload-sheet, .settings-dialog {
+      width: min(520px, calc(100vw - 24px));
+      max-width: none;
+      max-height: min(760px, calc(100dvh - 24px));
+      padding: 0;
+      overflow: hidden auto;
+      border: 0;
+      border-radius: 22px;
+      color: var(--app-text);
+      background: var(--app-surface);
+      box-shadow: var(--app-shadow);
+    }
+    .upload-sheet::backdrop, .settings-dialog::backdrop { background: rgba(16, 23, 18, .48); backdrop-filter: blur(2px); }
+    .sheet-body { padding: 8px 24px max(24px, calc(18px + env(safe-area-inset-bottom))); }
+    .sheet-handle { width: 42px; height: 5px; margin: 4px auto 18px; border-radius: 3px; background: #d8ddd9; }
+    .sheet-header { display: flex; margin-bottom: 18px; align-items: flex-start; justify-content: space-between; gap: 14px; }
+    .sheet-header h2 { margin: 0; font-size: 22px; line-height: 1.3; letter-spacing: -.03em; }
+    .sheet-header p { margin: 5px 0 0; color: var(--app-muted); font-size: 13px; line-height: 1.6; }
+    .sheet-close {
+      flex: 0 0 auto;
+      width: 42px;
+      height: 42px;
+      padding: 0;
+      border: 0;
+      border-radius: 50%;
+      color: var(--app-muted);
+      background: #eef1ee;
+      cursor: pointer;
+      font-size: 24px;
+      line-height: 1;
+    }
+    .upload-sheet input[type="file"] {
+      width: 100%;
+      margin: 0 0 10px;
+      padding: 16px;
+      border: 1px dashed #b8c5bb;
+      border-radius: 14px;
+      background: #f7faf8;
+      box-shadow: none;
+    }
+    .upload-sheet input[type="file"]::file-selector-button {
+      margin-right: 12px;
+      padding: 9px 12px;
+      border: 0;
+      border-radius: 9px;
+      color: var(--app-text);
+      background: #e8eeea;
+      font-weight: 700;
+    }
+    .file-selection { min-height: 21px; margin: 0 0 18px; color: var(--app-muted); font-size: 12px; line-height: 1.6; }
+    .sheet-actions { display: grid; grid-template-columns: 1fr 2fr; gap: 10px; }
+    .settings-dialog .sheet-body { padding-top: 18px; }
+    .settings-dialog .form-control { min-height: 44px; border-color: #cfd6d0; border-radius: 10px; }
+    .settings-dialog .checkbox-row { align-items: flex-start; line-height: 1.5; }
+    @media (max-width: 979px) {
+      .gallery-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    }
+    @media (max-width: 767px) {
+      .app-header-inner { min-height: 58px; padding-right: 14px; padding-left: 16px; }
+      .gallery-main { padding: 20px 0 max(112px, calc(82px + env(safe-area-inset-bottom))); }
+      .gallery-heading { padding: 0 16px; align-items: center; }
+      .gallery-heading .quiet-action { display: none; }
+      .gallery-days { gap: 22px; }
+      .gallery-day-heading { top: 58px; margin-bottom: 3px; padding: 9px 16px 7px; }
+      .gallery-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 2px; }
+      .gallery-item { border-radius: 2px; }
+      .gallery-more, .footer-note { padding-right: 16px; padding-left: 16px; }
+      .empty-gallery { margin: 0 16px; min-height: 52vh; }
+      .upload-sheet, .settings-dialog {
+        width: 100%;
+        max-height: calc(100dvh - 20px);
+        margin: auto 0 0;
+        border-radius: 22px 22px 0 0;
+      }
+      .sheet-body { padding-right: 18px; padding-left: 18px; }
+      .fab { right: max(18px, env(safe-area-inset-right)); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; }
+    }
   </style>
 </head>
 <body>
-<header class="navbar navbar-static-top">
-  <div class="navbar-inner">
-    <div class="container">
-      <div class="navbar-layout">
-        <a class="brand" href="/">まるのこし</a>
-        <span class="navbar-text">LINEで使う家族アルバム</span>
+<section id="authGate" class="auth-gate" aria-labelledby="authTitle">
+  <div class="auth-card">
+    <div class="auth-mark" aria-hidden="true">ま</div>
+    <h1 id="authTitle">まるのこし</h1>
+    <p class="auth-lead">家族の写真と動画を、画質ごと残すアルバムです。<br />LINEで本人確認して開きます。</p>
+    <button id="loginButton" class="primary-action auth-login-button" type="button" disabled>LINEでアルバムを開く</button>
+    <p class="auth-note">原本は再圧縮せず、家族専用の保存領域に保管します。</p>
+  </div>
+</section>
+
+<div id="appShell" hidden>
+  <header class="app-header">
+    <div class="app-header-inner">
+      <a class="app-brand" href="/">まるのこし</a>
+      <div class="user-menu-wrap">
+        <button id="userMenuButton" class="user-menu-button" type="button" aria-label="アカウントメニューを開く" aria-haspopup="menu" aria-expanded="false">
+          <img id="userAvatarImage" class="user-avatar-image" alt="" hidden />
+          <span id="userAvatarFallback" aria-hidden="true">ま</span>
+        </button>
+        <div id="userMenuPopover" class="user-menu-popover" role="menu" hidden>
+          <p id="userText" class="user-menu-name">LINE user</p>
+          <p id="userMeta" class="user-menu-meta">家族アルバム</p>
+          <div class="user-menu-actions">
+            <button id="logoutButton" class="secondary-action" type="button" role="menuitem">ログアウト</button>
+          </div>
+        </div>
       </div>
     </div>
+  </header>
+
+  <main class="gallery-main">
+    <section id="album" aria-labelledby="albumTitle">
+      <div class="gallery-heading">
+        <div>
+          <h1 id="albumTitle">家族アルバム</h1>
+          <p class="gallery-summary"><span id="albumCount" class="album-count" role="status" aria-live="polite" aria-label="表示件数 0件">0件</span>を保存しています</p>
+        </div>
+        <button id="loadMediaButton" class="quiet-action" type="button">一覧を更新</button>
+      </div>
+      <div id="galleryDays" class="gallery-days"></div>
+      <div class="gallery-more">
+        <button id="loadMoreMediaButton" class="secondary-action" type="button" hidden>さらに読み込む</button>
+      </div>
+    </section>
+    <p class="footer-note">写真・動画の原本をそのまま保存しています。</p>
+  </main>
+
+  <button id="addMediaButton" class="fab" type="button" aria-label="写真・動画を追加" hidden>＋</button>
+</div>
+
+<div id="status" class="status-toast" role="status" aria-live="polite" hidden>起動中...</div>
+
+<dialog id="uploadDrawer" class="upload-sheet" aria-modal="true" aria-labelledby="uploadTitle">
+  <div class="sheet-body">
+    <div class="sheet-handle" aria-hidden="true"></div>
+    <header class="sheet-header">
+      <div>
+        <h2 id="uploadTitle">写真・動画を追加</h2>
+        <p>LINEトークではなく、ここから選ぶと原本画質で保存されます。</p>
+      </div>
+      <button id="uploadDrawerCloseButton" class="sheet-close" type="button" aria-label="追加画面を閉じる">×</button>
+    </header>
+    <input id="fileInput" type="file" multiple accept="image/*,video/*,.dng,.DNG,.arw,.ARW" aria-label="保存する写真・動画を選択" />
+    <p id="fileSelectionText" class="file-selection">ファイルを選択してください</p>
+    <div class="sheet-actions">
+      <button id="uploadCancelButton" class="secondary-action" type="button">キャンセル</button>
+      <button id="uploadButton" class="primary-action" type="button" disabled>原本をアップロード</button>
+    </div>
   </div>
-</header>
-<main class="container app-main">
-  <section class="hero-unit">
-    <span class="label label-success">原本保存モード</span>
-    <h1>まるのこし</h1>
-    <p class="lead">家族の写真と動画を、画質ごと残す。LINEは入口として使い、原本はこの画面から直接保存します。</p>
-  </section>
+</dialog>
 
-  <section class="row-fluid setup-grid">
-    <div class="span6">
-      <section class="well">
-        <h2>1. LINEログイン</h2>
-        <p class="help-block">LIFFでLINEログインし、家族アルバムを開きます。</p>
-        <div class="button-row">
-          <button id="loginButton" class="btn btn-success" type="button">LINEで開始</button>
-          <button id="refreshButton" class="btn" type="button">再読込</button>
-        </div>
-        <p id="userText" class="user-state muted">未ログイン</p>
-      </section>
-    </div>
-
-    <div class="span6">
-      <section class="well">
-        <h2>2. 写真・動画を追加</h2>
-        <p class="help-block">LINEトークではなく、ここから原本を選んでください。保存時にSHA-256を照合します。</p>
-        <input id="fileInput" type="file" multiple accept="image/*,video/*,.dng,.DNG,.arw,.ARW" aria-label="保存する写真・動画を選択" />
-        <div class="button-row">
-          <button id="uploadButton" class="btn btn-primary" type="button">原本をアップロード</button>
-        </div>
-      </section>
-    </div>
-  </section>
-
-  <section id="groupSetupPanel" class="well group-setup" hidden>
-    <h2>LINEグループを連携</h2>
-    <p id="groupSetupDescription" class="help-block">グループを家族アルバムへ紐づけます。</p>
+<dialog id="groupSetupPanel" class="settings-dialog" aria-modal="true" aria-labelledby="groupSetupTitle">
+  <div class="sheet-body">
+    <header class="sheet-header">
+      <div>
+        <h2 id="groupSetupTitle">LINEグループを連携</h2>
+        <p id="groupSetupDescription">グループを家族アルバムへ紐づけます。</p>
+      </div>
+      <button id="groupSetupCloseButton" class="sheet-close" type="button" aria-label="グループ設定を閉じる">×</button>
+    </header>
     <div class="form-row">
       <label for="groupFamilySelect">連携するアルバム</label>
       <select id="groupFamilySelect" class="form-control"></select>
@@ -606,31 +973,10 @@ export function renderAppHtml(): string {
       <input id="groupNotificationsEnabled" type="checkbox" checked />
       新しいアップロードを写真と投稿者名つきで通知する
     </label>
-    <button id="groupBindButton" class="btn btn-success" type="button">この設定で連携</button>
+    <button id="groupBindButton" class="primary-action" type="button">この設定で連携</button>
     <p id="groupSetupResult" class="group-setup-result muted"></p>
-  </section>
-
-  <section class="well status-well">
-    <h2>状態</h2>
-    <div id="status" class="status" role="status" aria-live="polite">起動中...</div>
-  </section>
-
-  <section class="well gallery-well" id="album">
-    <div class="section-heading">
-      <h2>アルバム</h2>
-      <div class="album-heading-actions">
-        <span id="albumCount" class="album-count" role="status" aria-live="polite" aria-label="表示件数 0件">0</span>
-        <button id="loadMediaButton" class="btn btn-small" type="button">一覧を更新</button>
-      </div>
-    </div>
-    <div id="galleryDays" class="gallery-days"></div>
-    <div class="gallery-more">
-      <button id="loadMoreMediaButton" class="btn" type="button" hidden>さらに読み込む</button>
-    </div>
-  </section>
-
-  <p class="footer-note">原本ファイルは再圧縮せず、家族専用の保存領域に保管します。</p>
-</main>
+  </div>
+</dialog>
 
 <dialog id="galleryDialog" class="gallery-dialog" role="dialog" aria-modal="true" aria-labelledby="galleryTitle">
   <div class="gallery-dialog-shell">
@@ -672,6 +1018,8 @@ const state = {
   config: null,
   session: null,
   familyId: null,
+  liffReady: false,
+  canUpload: false,
   groupBindToken: appParams.get('groupBind'),
   groupBindingId: appParams.get('groupBinding'),
   pendingGroup: null,
@@ -682,8 +1030,19 @@ const state = {
   mediaHasMore: false,
 };
 const $ = (id) => document.getElementById(id);
-const status = (message) => { $('status').textContent = message; };
-const appendStatus = (message) => { $('status').textContent += '\\n' + message; };
+let statusTimer = null;
+function setStatus(message, append = false) {
+  const node = $('status');
+  node.textContent = append && node.textContent ? node.textContent + '\\n' + message : message;
+  node.dataset.tone = /ERROR|失敗|できません|未設定/.test(node.textContent) ? 'error' : 'normal';
+  node.hidden = false;
+  if (statusTimer) window.clearTimeout(statusTimer);
+  if (node.dataset.tone !== 'error') {
+    statusTimer = window.setTimeout(() => { node.hidden = true; }, 4200);
+  }
+}
+const status = (message) => setStatus(message);
+const appendStatus = (message) => setStatus(message, true);
 
 async function api(path, options = {}) {
   const res = await fetch(path, { credentials: 'include', ...options, headers: { ...(options.headers || {}) } });
@@ -694,23 +1053,67 @@ async function api(path, options = {}) {
   return data;
 }
 
+function showAuthenticatedUi(canUpload) {
+  $('authGate').hidden = true;
+  $('appShell').hidden = false;
+  $('addMediaButton').hidden = !canUpload;
+}
+
+function showLoginUi() {
+  $('authGate').hidden = false;
+  $('appShell').hidden = true;
+  $('addMediaButton').hidden = true;
+}
+
+function openDialog(dialog) {
+  if (!dialog.open) {
+    if (typeof dialog.showModal === 'function') dialog.showModal();
+    else dialog.setAttribute('open', '');
+  }
+}
+
+function closeDialog(dialog) {
+  if (dialog.open && typeof dialog.close === 'function') dialog.close();
+  else dialog.removeAttribute('open');
+}
+
+async function finishLogin() {
+  if (state.groupBindToken) {
+    await loadPendingGroupSetup().catch((error) => {
+      openDialog($('groupSetupPanel'));
+      $('groupSetupResult').textContent = '設定を読み込めません: ' + error.message;
+    });
+  }
+  await loadMedia();
+}
+
 async function boot() {
+  showLoginUi();
   state.config = await api('/api/config');
-  status('設定読込OK: ' + state.config.appName);
+
+  try {
+    const session = await api('/api/auth/session');
+    if (!state.groupBindingId || session.groupBindingId === state.groupBindingId) {
+      applySession(session);
+      await finishLogin();
+      return;
+    }
+  } catch {
+    // No browser session yet. Continue with LINE Login.
+  }
+
   if (!state.config.liffId) {
-    appendStatus('LIFF ID未設定です。Cloudflareデプロイ後にLINE DevelopersでLIFFを作成し、Worker secretへ設定します。');
+    status('LIFF IDが未設定です。管理者へ連絡してください。');
     return;
   }
   if (!window.liff) {
-    appendStatus('LIFF SDKを読み込めませんでした。');
+    status('LIFF SDKを読み込めませんでした。');
     return;
   }
-  await window.liff.init({ liffId: state.config.liffId, withLoginOnExternalBrowser: true });
-  appendStatus('LIFF初期化OK');
-  if (!window.liff.isLoggedIn()) {
-    appendStatus('LINEログインが必要です。');
-    return;
-  }
+  await window.liff.init({ liffId: state.config.liffId });
+  state.liffReady = true;
+  $('loginButton').disabled = false;
+  if (!window.liff.isLoggedIn()) return;
   await loginWithLiff();
 }
 
@@ -720,14 +1123,38 @@ function applySession(session) {
   const family = session.families?.find((item) => item.id === state.familyId) || null;
   const roleLabels = { owner: '管理者', admin: '管理者', uploader: '閲覧・投稿', viewer: '閲覧のみ' };
   const displayName = session.user?.displayName || 'LINE user';
-  $('userText').textContent = family
-    ? displayName + ' ・ ' + family.name + '（' + (roleLabels[family.role] || family.role) + '）'
-    : displayName;
-  $('uploadButton').disabled = !family || !['owner', 'admin', 'uploader'].includes(family.role);
+  const roleLabel = family ? (roleLabels[family.role] || family.role) : '';
+  const canUpload = Boolean(family && ['owner', 'admin', 'uploader'].includes(family.role));
+  state.canUpload = canUpload;
+
+  $('userText').textContent = displayName;
+  $('userMeta').textContent = family ? family.name + ' ・ ' + roleLabel : '家族アルバム';
+  $('albumTitle').textContent = family?.name || '家族アルバム';
+  $('uploadButton').disabled = !canUpload || !$('fileInput').files?.length;
+
+  const avatarImage = $('userAvatarImage');
+  const avatarFallback = $('userAvatarFallback');
+  if (session.user?.pictureUrl) {
+    avatarImage.src = session.user.pictureUrl;
+    avatarImage.hidden = false;
+    avatarFallback.hidden = true;
+  } else {
+    avatarImage.removeAttribute('src');
+    avatarImage.hidden = true;
+    avatarFallback.hidden = false;
+    avatarFallback.textContent = displayName.trim().charAt(0) || 'ま';
+  }
+  $('userMenuButton').setAttribute('aria-label', displayName + 'のアカウントメニューを開く');
+  showAuthenticatedUi(canUpload);
 }
 
 async function loginWithLiff() {
-  if (!window.liff?.isLoggedIn()) {
+  if (!window.liff) throw new Error('LIFF SDKを読み込めませんでした。');
+  if (!state.liffReady) {
+    await window.liff.init({ liffId: state.config.liffId });
+    state.liffReady = true;
+  }
+  if (!window.liff.isLoggedIn()) {
     window.liff.login();
     return;
   }
@@ -742,14 +1169,8 @@ async function loginWithLiff() {
     }),
   });
   applySession(session);
-  status('ログインOK: ' + $('userText').textContent);
-  if (state.groupBindToken) {
-    await loadPendingGroupSetup().catch((error) => {
-      $('groupSetupPanel').hidden = false;
-      $('groupSetupResult').textContent = '設定を読み込めません: ' + error.message;
-    });
-  }
-  await loadMedia();
+  await finishLogin();
+  status('アルバムを開きました');
 }
 
 async function ensureSession() {
@@ -769,7 +1190,7 @@ async function ensureSession() {
 async function loadPendingGroupSetup() {
   const data = await api('/api/line-groups/pending/' + encodeURIComponent(state.groupBindToken));
   state.pendingGroup = data.group;
-  $('groupSetupPanel').hidden = false;
+  openDialog($('groupSetupPanel'));
   $('groupSetupDescription').textContent = '「' + data.group.name + '」を、どのアルバムへ連携するか選んでください。';
   const select = $('groupFamilySelect');
   select.innerHTML = '';
@@ -805,6 +1226,7 @@ async function bindPendingGroup() {
     state.familyId = familyId;
     $('groupSetupResult').textContent = '連携しました。グループへ確認メッセージを送信済みです。';
     button.textContent = '連携済み';
+    window.setTimeout(() => closeDialog($('groupSetupPanel')), 900);
   } catch (error) {
     button.disabled = false;
     $('groupSetupResult').textContent = 'ERROR: ' + error.message;
@@ -899,40 +1321,110 @@ async function createNotificationPreview(file) {
   }
 }
 
+function updateFileSelection() {
+  const files = [...$('fileInput').files];
+  const totalBytes = files.reduce((sum, file) => sum + file.size, 0);
+  $('fileSelectionText').textContent = files.length
+    ? files.length + '件 ・ ' + formatBytes(totalBytes)
+    : 'ファイルを選択してください';
+  $('uploadButton').disabled = !state.canUpload || files.length === 0;
+}
+
+function openUploadDrawer() {
+  if (!state.canUpload) return;
+  openDialog($('uploadDrawer'));
+  window.setTimeout(() => $('fileInput').focus(), 0);
+}
+
+function closeUploadDrawer(clearSelection = false) {
+  closeDialog($('uploadDrawer'));
+  if (clearSelection) {
+    $('fileInput').value = '';
+    updateFileSelection();
+  }
+}
+
+function toggleUserMenu(force) {
+  const popover = $('userMenuPopover');
+  const wasOpen = !popover.hidden;
+  const isOpen = force ?? !wasOpen;
+  popover.hidden = !isOpen;
+  $('userMenuButton').setAttribute('aria-expanded', String(isOpen));
+  if (isOpen) {
+    window.requestAnimationFrame(() => $('logoutButton').focus());
+  } else if (wasOpen && popover.contains(document.activeElement)) {
+    $('userMenuButton').focus();
+  }
+}
+
+async function logout() {
+  await api('/api/auth/logout', { method: 'POST' });
+  if (window.liff && state.config?.liffId) {
+    try {
+      if (!state.liffReady) {
+        await window.liff.init({ liffId: state.config.liffId });
+        state.liffReady = true;
+      }
+      if (window.liff.isLoggedIn()) window.liff.logout();
+    } catch {
+      // The server session is already cleared; keep the login gate usable.
+    }
+  }
+  state.session = null;
+  state.familyId = null;
+  state.canUpload = false;
+  state.assets = [];
+  toggleUserMenu(false);
+  closeUploadDrawer(true);
+  $('loginButton').disabled = !window.liff || !state.config?.liffId;
+  showLoginUi();
+  status('ログアウトしました');
+}
+
 async function uploadFiles() {
   await ensureSession();
   if (!state.familyId) throw new Error('家族グループがありません。');
   const files = [...$('fileInput').files];
   if (files.length === 0) throw new Error('ファイルを選んでください。');
-  status(files.length + '件アップロードします...');
-  for (const file of files) {
-    appendStatus('hash計算中: ' + file.name);
-    const hash = await sha256Hex(file);
-    const notificationPreview = await createNotificationPreview(file);
-    const headers = {
-      'x-file-name': encodeURIComponent(file.name),
-      'x-client-sha256': hash,
-      'x-client-last-modified': new Date(file.lastModified).toISOString(),
-    };
-    let uploadBody = file;
-    if (notificationPreview && file.size <= 40 * 1024 * 1024) {
-      const form = new FormData();
-      form.append('original', file, file.name);
-      form.append('notificationPreview', notificationPreview, 'preview.jpg');
-      uploadBody = form;
-    } else {
-      headers['content-type'] = file.type || 'application/octet-stream';
+  const button = $('uploadButton');
+  button.disabled = true;
+  button.textContent = '保存中...';
+  status(files.length + '件の保存を開始します');
+  try {
+    for (const file of files) {
+      appendStatus('準備中: ' + file.name);
+      const hash = await sha256Hex(file);
+      const notificationPreview = await createNotificationPreview(file);
+      const headers = {
+        'x-file-name': encodeURIComponent(file.name),
+        'x-client-sha256': hash,
+        'x-client-last-modified': new Date(file.lastModified).toISOString(),
+      };
+      let uploadBody = file;
+      if (notificationPreview && file.size <= 40 * 1024 * 1024) {
+        const form = new FormData();
+        form.append('original', file, file.name);
+        form.append('notificationPreview', notificationPreview, 'preview.jpg');
+        uploadBody = form;
+      } else {
+        headers['content-type'] = file.type || 'application/octet-stream';
+      }
+      appendStatus('送信中: ' + file.name);
+      await api('/api/families/' + encodeURIComponent(state.familyId) + '/media', {
+        method: 'PUT',
+        headers,
+        body: uploadBody,
+      });
     }
-    appendStatus('送信中: ' + file.name + ' (' + Math.round(file.size / 1024) + 'KB)');
-    const result = await api('/api/families/' + encodeURIComponent(state.familyId) + '/media', {
-      method: 'PUT',
-      headers,
-      body: uploadBody,
-    });
-    appendStatus('保存OK: ' + result.asset.originalFilename + ' sha256=' + result.asset.sha256.slice(0, 12) + '...');
+    $('fileInput').value = '';
+    updateFileSelection();
+    await loadMedia();
+    closeUploadDrawer();
+    status(files.length + '件を保存しました');
+  } finally {
+    button.textContent = '原本をアップロード';
+    button.disabled = !state.canUpload || !$('fileInput').files?.length;
   }
-  $('fileInput').value = '';
-  await loadMedia();
 }
 
 function assetDate(item) {
@@ -990,13 +1482,16 @@ function renderGallery(assets) {
   root.innerHTML = '';
   const countBadge = $('albumCount');
   const totalCount = Math.max(assets.length, Number(state.totalCount) || 0);
-  countBadge.textContent = String(totalCount);
+  countBadge.textContent = totalCount + '件';
   countBadge.setAttribute(
     'aria-label',
     '保存件数 ' + totalCount + '件' + (assets.length < totalCount ? '、' + assets.length + '件を表示中' : ''),
   );
   if (!assets.length) {
-    root.innerHTML = '<div class="alert alert-info">まだ写真・動画がありません。最初の原本をアップロードしてください。</div>';
+    const emptyMessage = state.canUpload
+      ? '右下の＋から、最初の原本を追加できます。'
+      : '写真や動画が追加されると、ここに表示されます。';
+    root.innerHTML = '<div class="empty-gallery"><div><strong>まだ写真・動画がありません</strong>' + emptyMessage + '</div></div>';
     return;
   }
 
@@ -1169,9 +1664,31 @@ async function loadMedia(reset = true) {
 }
 
 $('loginButton').addEventListener('click', () => loginWithLiff().catch((e) => status('ERROR: ' + e.message)));
-$('refreshButton').addEventListener('click', () => boot().catch((e) => status('ERROR: ' + e.message)));
+$('userMenuButton').addEventListener('click', (event) => {
+  event.stopPropagation();
+  toggleUserMenu();
+});
+$('userMenuPopover').addEventListener('click', (event) => event.stopPropagation());
+document.addEventListener('click', () => toggleUserMenu(false));
+$('logoutButton').addEventListener('click', () => logout().catch((e) => status('ERROR: ' + e.message)));
+$('addMediaButton').addEventListener('click', openUploadDrawer);
+$('uploadDrawerCloseButton').addEventListener('click', () => closeUploadDrawer(true));
+$('uploadCancelButton').addEventListener('click', () => closeUploadDrawer(true));
+$('fileInput').addEventListener('change', updateFileSelection);
 $('uploadButton').addEventListener('click', () => uploadFiles().catch((e) => status('ERROR: ' + e.message)));
+$('uploadDrawer').addEventListener('click', (event) => {
+  if (event.target === $('uploadDrawer')) closeUploadDrawer(true);
+});
+$('uploadDrawer').addEventListener('close', () => {
+  if (!$('addMediaButton').hidden) {
+    window.requestAnimationFrame(() => $('addMediaButton').focus());
+  }
+});
 $('groupBindButton').addEventListener('click', () => bindPendingGroup().catch((e) => appendStatus('グループ連携ERROR: ' + e.message)));
+$('groupSetupCloseButton').addEventListener('click', () => closeDialog($('groupSetupPanel')));
+$('groupSetupPanel').addEventListener('click', (event) => {
+  if (event.target === $('groupSetupPanel')) closeDialog($('groupSetupPanel'));
+});
 $('loadMediaButton').addEventListener('click', () => loadMedia(true).catch((e) => status('ERROR: ' + e.message)));
 $('loadMoreMediaButton').addEventListener('click', () => loadMedia(false).catch((e) => status('ERROR: ' + e.message)));
 $('galleryCloseButton').addEventListener('click', closeGallery);
@@ -1189,6 +1706,11 @@ $('galleryDialog').addEventListener('close', () => {
   state.activeAssetId = null;
 });
 document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && !$('userMenuPopover').hidden) {
+    event.preventDefault();
+    toggleUserMenu(false);
+    return;
+  }
   if (!$('galleryDialog').open || event.target instanceof HTMLMediaElement) return;
   if (event.key === 'ArrowLeft') {
     event.preventDefault();

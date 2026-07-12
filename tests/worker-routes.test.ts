@@ -45,20 +45,38 @@ describe('public Worker routes', () => {
     expect(html).toContain('.arw,.ARW');
   });
 
-  it('serves a Bootstrap 2-inspired layout with responsive local styles', async () => {
+  it('serves a gallery-first mobile layout with auth gate, user avatar, FAB, and upload sheet', async () => {
     const res = await worker.fetch(new Request('https://mrnks.2-38.com/'), fakeEnv());
     const html = await res.text();
 
-    expect(html).toContain('class="navbar navbar-static-top"');
-    expect(html).toContain('class="container"');
-    expect(html).toContain('class="hero-unit"');
-    expect(html).toContain('class="row-fluid setup-grid"');
-    expect(html).toContain('class="span6"');
-    expect(html).toContain('class="well status-well"');
-    expect(html).toContain('class="btn btn-primary"');
-    expect(html).toContain('class="label label-success"');
-    expect(html).toContain('@media (max-width: 767px)');
-    expect(html).not.toContain('bootstrap.min.css');
+    expect(html).toContain('id="authGate"');
+    expect(html).toContain('id="appShell" hidden');
+    expect(html).toContain('id="userMenuButton"');
+    expect(html).toContain('aria-haspopup="menu"');
+    expect(html).toContain('id="addMediaButton"');
+    expect(html).toContain('class="fab"');
+    expect(html).toContain('id="uploadDrawer"');
+    expect(html).toContain('class="upload-sheet"');
+    expect(html).toContain('aria-modal="true"');
+    expect(html).toContain("$('uploadDrawer').addEventListener('close'");
+    expect(html).toContain("$('addMediaButton').focus()");
+    expect(html).toContain('env(safe-area-inset-bottom)');
+    expect(html).not.toContain('<h2>1. LINEログイン</h2>');
+    expect(html).not.toContain('class="hero-unit"');
+    expect(html).not.toContain('class="row-fluid setup-grid"');
+    expect(html).not.toContain('class="well status-well"');
+  });
+
+  it('switches between the login gate and authenticated gallery shell', async () => {
+    const res = await worker.fetch(new Request('https://mrnks.2-38.com/'), fakeEnv());
+    const html = await res.text();
+
+    expect(html).toContain('function showAuthenticatedUi');
+    expect(html).toContain("$('authGate').hidden = true");
+    expect(html).toContain("$('appShell').hidden = false");
+    expect(html).toContain("$('addMediaButton').hidden = !canUpload");
+    expect(html).toContain('function openUploadDrawer');
+    expect(html).toContain("api('/api/auth/logout', { method: 'POST' })");
   });
 
   it('serves a syntactically valid inline module', async () => {
@@ -70,11 +88,12 @@ describe('public Worker routes', () => {
     expect(() => new Function(inlineModule!)).not.toThrow();
   });
 
-  it('automatically starts LINE Login when LIFF opens in an external browser', async () => {
+  it('keeps the app login gate visible until the user chooses LINE Login', async () => {
     const res = await worker.fetch(new Request('https://mrnks.2-38.com/'), fakeEnv());
     const html = await res.text();
 
-    expect(html).toContain('withLoginOnExternalBrowser: true');
+    expect(html).toContain('await window.liff.init({ liffId: state.config.liffId });');
+    expect(html).not.toContain('withLoginOnExternalBrowser: true');
   });
 
   it('serves a date-grouped family gallery with an accessible lightbox', async () => {
