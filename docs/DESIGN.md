@@ -429,7 +429,9 @@ multipart upload を完了し、ハッシュとサイズを確定する。
 
 #### `DELETE /api/media/:assetId`
 
-`owner` / `admin` / `uploader` が、同じ家族アルバムのメディアをゴミ箱へ移動する。D1の `trashed_at` / `trashed_by_user_id` だけを更新し、原本とプレビューはNAS/R2に期限なく保持する。通常一覧・原本DL・公開通知プレビューからは即時に除外し、既存ダウンロードトークンも失効させる。自動完全削除・ゴミ箱を空にするAPI・scheduled削除処理は持たない。
+`owner` / `admin` / `uploader` が、同じ家族アルバムのメディアをゴミ箱へ移動する。D1の `trashed_at` / `trashed_by_user_id` だけを更新し、原本とプレビューはNAS/R2に期限なく保持する。通常一覧・原本DL・公開通知プレビューのオリジンアクセスからは即時に除外し、既存ダウンロードトークンも失効させる。通知プレビュー応答は `Cache-Control: no-store` とする。ただし、LINEや端末が移動前に取得・複製した画像自体を後から回収できるとは保証しない。自動完全削除・ゴミ箱を空にするAPI・scheduled削除処理は持たない。
+
+旧Workerへのロールバックでも完全削除が再開しないよう、移行完了後は旧 `media_deletion_jobs` テーブル自体を削除する。旧WorkerはこのテーブルへのINSERTを先頭に含むD1 batchが失敗するため、メディア行やstorage objectを削除できずfail closedになる。
 
 #### `GET /api/families/:familyId/trash`
 

@@ -145,6 +145,8 @@ describe('public Worker routes', () => {
     expect(html).toContain('id="trashButton"');
     expect(html).toContain('id="trashDialog"');
     expect(html).toContain('id="trashList"');
+    expect(html).toContain('id="trashLoadMoreButton"');
+    expect(html).toContain('loadTrash(false)');
     expect(html).toContain('期限なく保持');
     expect(html).toContain('ゴミ箱へ移動');
     expect(html).toContain('復元');
@@ -165,6 +167,9 @@ describe('public Worker routes', () => {
     expect(html).toContain('button.dataset.assetId = item.id');
     expect(html).toContain('focusAfterMediaDelete(nextFocusAssetId)');
     expect(html).toContain('id="albumTitle" class="visually-hidden" tabindex="-1"');
+    expect(html).toContain('id="albumSummary" class="gallery-summary" tabindex="-1"');
+    expect(html).toContain("else $('albumSummary').focus()");
+    expect(html).toContain("restore.setAttribute('aria-label', item.originalFilename + 'を復元')");
     expect(html).toContain('id="albumCount"');
   });
 });

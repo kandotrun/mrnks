@@ -856,13 +856,19 @@ async function handleListMedia(request: Request, env: Env, familyId: string): Pr
 async function handleListTrash(request: Request, env: Env, familyId: string): Promise<Response> {
   const user = await requireUser(request, env);
   await requireFamilyRole(user, familyId, ['owner', 'admin', 'uploader']);
+  const requestedOffset = Number.parseInt(new URL(request.url).searchParams.get('offset') || '0', 10);
+  const offset = Number.isFinite(requestedOffset)
+    ? Math.min(Math.max(requestedOffset, 0), MAX_MEDIA_OFFSET)
+    : 0;
   const rows = await env.DB.prepare(
     `SELECT id, type, original_filename, original_mime_type, original_size_bytes, original_sha256,
-            captured_at, client_last_modified_at, uploaded_at, processing_status, trashed_at
+            captured_at, client_last_modified_at, uploaded_at, processing_status, trashed_at,
+            COUNT(*) OVER () AS total_count
        FROM media_assets
       WHERE family_id = ? AND trashed_at IS NOT NULL
-      ORDER BY trashed_at DESC, id DESC`,
-  ).bind(familyId).all<{
+      ORDER BY trashed_at DESC, id DESC
+      LIMIT ? OFFSET ?`,
+  ).bind(familyId, MEDIA_PAGE_SIZE + 1, offset).all<{
     id: string;
     type: string;
     original_filename: string;
@@ -874,10 +880,13 @@ async function handleListTrash(request: Request, env: Env, familyId: string): Pr
     uploaded_at: string;
     processing_status: string;
     trashed_at: string;
+    total_count: number;
   }>();
 
+  const resultRows = rows.results || [];
+  const pageRows = resultRows.slice(0, MEDIA_PAGE_SIZE);
   return jsonResponse({
-    assets: (rows.results || []).map((row) => ({
+    assets: pageRows.map((row) => ({
       id: row.id,
       type: row.type,
       originalFilename: row.original_filename,
@@ -891,6 +900,9 @@ async function handleListTrash(request: Request, env: Env, familyId: string): Pr
       trashedAt: row.trashed_at,
       previewUrl: `/api/media/${encodeURIComponent(row.id)}/preview?trash=1`,
     })),
+    totalCount: resultRows[0]?.total_count ?? 0,
+    hasMore: resultRows.length > MEDIA_PAGE_SIZE,
+    nextOffset: offset + pageRows.length,
   });
 }
 
@@ -991,7 +1003,7 @@ async function handleLineNotificationPreview(env: Env, assetId: string, token: s
     headers: {
       'content-type': asset.notification_preview_mime_type,
       'content-length': String(asset.notification_preview_size_bytes ?? object.size),
-      'cache-control': 'public, max-age=31536000, immutable',
+      'cache-control': 'no-store',
       'x-content-type-options': 'nosniff',
       'content-security-policy': "default-src 'none'",
     },

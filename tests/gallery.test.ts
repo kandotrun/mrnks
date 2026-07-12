@@ -872,6 +872,7 @@ describe('gallery and RAW previews', () => {
         uploaded_at: '2026-07-12T00:00:00.000Z',
         processing_status: 'ready',
         trashed_at: '2026-07-12T03:04:05.000Z',
+        total_count: 1,
       }],
     };
     const res = await worker.fetch(new Request('https://mrnks.2-38.com/api/families/fam_1/trash', {
@@ -886,7 +887,43 @@ describe('gallery and RAW previews', () => {
         trashedAt: '2026-07-12T03:04:05.000Z',
         previewUrl: '/api/media/ast_1/preview?trash=1',
       })],
+      totalCount: 1,
+      hasMore: false,
+      nextOffset: 1,
     });
+  });
+
+  it('spec: paginates indefinite trash instead of rendering it without a bound', async () => {
+    const trashRows = Array.from({ length: 61 }, (_, index) => ({
+      id: `ast_${index}`,
+      type: 'image',
+      original_filename: `photo-${index}.jpg`,
+      original_mime_type: 'image/jpeg',
+      original_size_bytes: 1_000 + index,
+      original_sha256: `hash-${index}`,
+      captured_at: null,
+      client_last_modified_at: null,
+      uploaded_at: '2026-07-12T00:00:00.000Z',
+      processing_status: 'ready',
+      trashed_at: new Date(Date.UTC(2026, 6, 12, 0, 0, 61 - index)).toISOString(),
+      total_count: 75,
+    }));
+    const capture: DeleteCapture = { deletedKeys: [], runs: [], trashRows };
+    const res = await worker.fetch(new Request('https://mrnks.2-38.com/api/families/fam_1/trash?offset=0', {
+      headers: { cookie: 'mrnks_session=test-token' },
+    }), fakeDeleteEnv('owner', capture));
+    const body = await res.json() as {
+      assets: Array<{ id: string }>;
+      totalCount: number;
+      hasMore: boolean;
+      nextOffset: number;
+    };
+
+    expect(res.status).toBe(200);
+    expect(body.assets).toHaveLength(60);
+    expect(body.totalCount).toBe(75);
+    expect(body.hasMore).toBe(true);
+    expect(body.nextOffset).toBe(60);
   });
 
   it('spec: a trashed asset is hidden from normal preview access but remains previewable to an editor from trash', async () => {
@@ -907,6 +944,34 @@ describe('gallery and RAW previews', () => {
       fakeGalleryEnv(fixture, new Uint8Array(), [], [], { trashed_at: trashedAt }, fixture),
     );
     expect(visible.status).toBe(200);
+  });
+
+  it('spec: viewer cannot list trash, restore media, or use a trash-scoped preview', async () => {
+    const capture: DeleteCapture = { deletedKeys: [], runs: [] };
+    const trashList = await worker.fetch(new Request('https://mrnks.2-38.com/api/families/fam_1/trash', {
+      headers: { cookie: 'mrnks_session=test-token' },
+    }), fakeDeleteEnv('viewer', capture));
+    expect(trashList.status).toBe(403);
+
+    const restore = await worker.fetch(new Request('https://mrnks.2-38.com/api/media/ast_1/restore', {
+      method: 'POST',
+      headers: { cookie: 'mrnks_session=test-token' },
+    }), fakeDeleteEnv('viewer', capture, true, 'fam_1', 'nas', '2026-07-12T00:00:00.000Z'));
+    expect(restore.status).toBe(403);
+
+    const fixture = createDngHeaderFixture();
+    const preview = await worker.fetch(new Request('https://mrnks.2-38.com/api/media/ast_1/preview?trash=1', {
+      headers: { cookie: 'mrnks_session=test-token' },
+    }), fakeGalleryEnv(
+      fixture,
+      new Uint8Array(),
+      [],
+      [],
+      { trashed_at: '2026-07-12T00:00:00.000Z' },
+      fixture,
+      [{ id: 'fam_1', name: '家族', role: 'viewer' }],
+    ));
+    expect(preview.status).toBe(403);
   });
 
   it('spec: scheduled maintenance never permanently deletes legacy queued media', async () => {

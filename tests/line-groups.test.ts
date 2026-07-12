@@ -534,8 +534,10 @@ describe('LINE group lifecycle', () => {
 
   it('serves only the stored thumbnail at the unguessable LINE preview URL', async () => {
     const previewBytes = new Uint8Array([0xff, 0xd8, 0xff, 0xd9]);
+    const preparedSql: string[] = [];
     const db = {
       prepare(sql: string) {
+        preparedSql.push(sql);
         return {
           bind() {
             return {
@@ -569,7 +571,8 @@ describe('LINE group lifecycle', () => {
     const response = await worker.fetch(new Request(`https://mrnks.2-38.com/api/line-preview/ast_1/${token}`), env);
     expect(response.status).toBe(200);
     expect(response.headers.get('content-type')).toBe('image/jpeg');
-    expect(response.headers.get('cache-control')).toContain('immutable');
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(preparedSql.some((sql) => sql.includes('trashed_at IS NULL'))).toBe(true);
     expect(new Uint8Array(await response.arrayBuffer())).toEqual(previewBytes);
 
     const denied = await worker.fetch(new Request(`https://mrnks.2-38.com/api/line-preview/ast_1/${'0'.repeat(64)}`), env);

@@ -734,6 +734,7 @@ export function renderAppHtml(): string {
       letter-spacing: -.04em;
     }
     .gallery-summary { margin: 0; color: var(--app-muted); font-size: 13px; }
+    .gallery-summary:focus { outline: 2px solid var(--app-green); outline-offset: 4px; border-radius: 4px; }
     .album-count { color: inherit; background: transparent; padding: 0; font-size: inherit; font-weight: 700; }
     .gallery-days { display: grid; gap: 30px; }
     .gallery-day-heading {
@@ -907,6 +908,7 @@ export function renderAppHtml(): string {
     .settings-dialog .checkbox-row { align-items: flex-start; line-height: 1.5; }
     .trash-note { margin: 0 0 16px; color: var(--app-muted); font-size: 13px; line-height: 1.65; }
     .trash-list { display: grid; gap: 10px; }
+    .trash-more { margin-top: 14px; text-align: center; }
     .trash-empty { padding: 28px 16px; border: 1px dashed #cfd6d0; border-radius: 14px; color: var(--app-muted); text-align: center; }
     .trash-item {
       display: grid;
@@ -993,7 +995,7 @@ export function renderAppHtml(): string {
       <div class="gallery-heading">
         <div>
           <h1 id="albumTitle" class="visually-hidden" tabindex="-1">家族アルバム</h1>
-          <p class="gallery-summary"><span id="albumCount" class="album-count" role="status" aria-live="polite" aria-label="表示件数 0件">0件</span>を保存しています</p>
+          <p id="albumSummary" class="gallery-summary" tabindex="-1"><span id="albumCount" class="album-count" role="status" aria-live="polite" aria-label="表示件数 0件">0件</span>を保存しています</p>
         </div>
         <button id="loadMediaButton" class="quiet-action" type="button">一覧を更新</button>
       </div>
@@ -1074,6 +1076,7 @@ export function renderAppHtml(): string {
     </header>
     <p class="trash-note">ゴミ箱の原本とプレビューは期限なく保持され、自動で完全削除されません。</p>
     <div id="trashList" class="trash-list" aria-live="polite"></div>
+    <div class="trash-more"><button id="trashLoadMoreButton" class="secondary-action" type="button" hidden>さらに読み込む</button></div>
   </div>
 </dialog>
 
@@ -1140,6 +1143,8 @@ const state = {
   assets: [],
   trashAssets: [],
   trashLoading: false,
+  trashOffset: 0,
+  trashHasMore: false,
   activeAssetId: null,
   deleteInProgress: false,
   mediaOffset: 0,
@@ -1500,6 +1505,8 @@ async function logout() {
   state.canUpload = false;
   state.assets = [];
   state.trashAssets = [];
+  state.trashOffset = 0;
+  state.trashHasMore = false;
   toggleUserMenu(false);
   closeDialog($('trashDialog'));
   closeUploadDrawer(true);
@@ -1846,6 +1853,7 @@ function renderTrash(items) {
     restore.className = 'secondary-action trash-restore';
     restore.type = 'button';
     restore.textContent = '復元';
+    restore.setAttribute('aria-label', item.originalFilename + 'を復元');
     restore.addEventListener('click', () => restoreTrashItem(item, restore).catch((error) => status('ERROR: ' + error.message)));
 
     row.append(thumbWrap, copy, restore);
@@ -1853,16 +1861,31 @@ function renderTrash(items) {
   }
 }
 
-async function loadTrash() {
+async function loadTrash(reset = true) {
   if (!state.canUpload || !state.familyId) return;
+  const loadMoreButton = $('trashLoadMoreButton');
   state.trashLoading = true;
+  loadMoreButton.disabled = true;
   renderTrash(state.trashAssets);
   try {
-    const data = await api('/api/families/' + encodeURIComponent(state.familyId) + '/trash');
-    state.trashAssets = data.assets || [];
+    const offset = reset ? 0 : state.trashOffset;
+    const data = await api(
+      '/api/families/' + encodeURIComponent(state.familyId) + '/trash?offset=' + encodeURIComponent(offset),
+    );
+    const incoming = data.assets || [];
+    if (reset) {
+      state.trashAssets = incoming;
+    } else {
+      const existingIds = new Set(state.trashAssets.map((asset) => asset.id));
+      state.trashAssets = state.trashAssets.concat(incoming.filter((asset) => !existingIds.has(asset.id)));
+    }
+    state.trashOffset = Number.isInteger(data.nextOffset) ? data.nextOffset : state.trashAssets.length;
+    state.trashHasMore = Boolean(data.hasMore);
   } finally {
     state.trashLoading = false;
     renderTrash(state.trashAssets);
+    loadMoreButton.hidden = !state.trashHasMore;
+    loadMoreButton.disabled = false;
   }
 }
 
@@ -1870,7 +1893,7 @@ async function openTrashDialog() {
   if (!state.canUpload) return;
   toggleUserMenu(false);
   openDialog($('trashDialog'));
-  await loadTrash();
+  await loadTrash(true);
 }
 
 async function restoreTrashItem(item, button) {
@@ -1880,6 +1903,7 @@ async function restoreTrashItem(item, button) {
   try {
     await api('/api/media/' + encodeURIComponent(item.id) + '/restore', { method: 'POST' });
     state.trashAssets = state.trashAssets.filter((asset) => asset.id !== item.id);
+    state.trashOffset = Math.max(0, state.trashOffset - 1);
     renderTrash(state.trashAssets);
     await loadMedia(true);
     status('「' + item.originalFilename + '」を復元しました');
@@ -1919,7 +1943,7 @@ function focusAfterMediaDelete(assetId) {
       ? [...document.querySelectorAll('.gallery-item')].find((button) => button.dataset.assetId === assetId)
       : null;
     if (target instanceof HTMLElement) target.focus();
-    else $('albumTitle').focus();
+    else $('albumSummary').focus();
   });
 }
 
@@ -2055,6 +2079,7 @@ $('userMenuButton').addEventListener('click', (event) => {
 $('userMenuPopover').addEventListener('click', (event) => event.stopPropagation());
 document.addEventListener('click', () => toggleUserMenu(false));
 $('trashButton').addEventListener('click', () => openTrashDialog().catch((e) => status('ERROR: ' + e.message)));
+$('trashLoadMoreButton').addEventListener('click', () => loadTrash(false).catch((e) => status('ERROR: ' + e.message)));
 $('trashCloseButton').addEventListener('click', () => closeDialog($('trashDialog')));
 $('trashDialog').addEventListener('click', (event) => {
   if (event.target === $('trashDialog')) closeDialog($('trashDialog'));
