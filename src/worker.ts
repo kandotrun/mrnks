@@ -141,6 +141,9 @@ interface StoredMediaAsset {
   original_size_bytes: number;
   original_storage_key: string;
   original_storage_backend: 'r2' | 'nas';
+  notification_preview_storage_key: string | null;
+  notification_preview_mime_type: string | null;
+  notification_preview_size_bytes: number | null;
 }
 
 interface MediaDeletionJob {
@@ -436,6 +439,24 @@ async function handleCompleteNasUpload(
     && receipt.sizeBytes === session.original_size_bytes
     && /^[a-f0-9]{64}$/.test(receipt.sha256);
   if (!receiptMatches) throw new HttpError(400, 'completion_receipt_mismatch');
+
+  if (!notificationPreviewBytes && rawPreviewFormat(session.original_filename, session.original_mime_type)) {
+    try {
+      const extracted = await extractRawPreviewBytes(env, {
+        id: session.asset_id,
+        original_storage_key: session.original_storage_key,
+        original_storage_backend: 'nas',
+        original_size_bytes: session.original_size_bytes,
+        original_mime_type: session.original_mime_type,
+        original_filename: session.original_filename,
+      });
+      assertLineNotificationPreview(extracted.bytes, 'image/jpeg');
+      notificationPreviewBytes = extracted.bytes;
+      notificationPreviewMimeType = 'image/jpeg';
+    } catch (error) {
+      console.warn('nas raw preview extraction failed', error instanceof Error ? error.message : String(error));
+    }
+  }
 
   let notificationPreviewStorageKey: string | null = null;
   if (notificationPreviewBytes && notificationPreviewMimeType) {
@@ -834,7 +855,8 @@ async function loadAuthorizedMediaAsset(request: Request, env: Env, assetId: str
   const user = await requireUser(request, env);
   const asset = await env.DB.prepare(
     `SELECT id, family_id, type, original_filename, original_mime_type, original_size_bytes,
-            original_storage_key, original_storage_backend
+            original_storage_key, original_storage_backend,
+            notification_preview_storage_key, notification_preview_mime_type, notification_preview_size_bytes
        FROM media_assets
       WHERE id = ?
       LIMIT 1`,
@@ -1054,38 +1076,75 @@ async function readOriginalBytes(
   return bytes.byteLength === length ? bytes : null;
 }
 
+async function extractRawPreviewBytes(env: Env, asset: OriginalAsset): Promise<{ bytes: Uint8Array; format: RawPreviewFormat }> {
+  const format = rawPreviewFormat(asset.original_filename, asset.original_mime_type);
+  if (!format) throw new HttpError(415, 'raw_preview_unavailable');
+  const descriptor = await findRawJpegPreview({
+    size: asset.original_size_bytes,
+    async read(offset: number, length: number): Promise<Uint8Array | null> {
+      return readOriginalBytes(env, asset, offset, length);
+    },
+  });
+  if (!descriptor || descriptor.offset + descriptor.length > asset.original_size_bytes) {
+    throw new HttpError(415, 'raw_preview_unavailable');
+  }
+  const previewBytes = await readOriginalBytes(env, asset, descriptor.offset, descriptor.length);
+  if (!previewBytes) throw new HttpError(404, 'original_object_not_found');
+  const completeLength = findCompleteJpegLength(previewBytes);
+  if (previewBytes.byteLength !== descriptor.length || !completeLength) {
+    throw new HttpError(415, 'raw_preview_invalid');
+  }
+  const bytes = new Uint8Array(completeLength);
+  bytes.set(previewBytes.subarray(0, completeLength));
+  return { bytes, format };
+}
+
 async function handleMediaPreview(request: Request, env: Env, assetId: string): Promise<Response> {
   const asset = await loadAuthorizedMediaAsset(request, env, assetId);
+
+  if (asset.notification_preview_storage_key) {
+    const storedPreview = await env.MEDIA_BUCKET.get(asset.notification_preview_storage_key);
+    if (storedPreview) {
+      const headers = new Headers();
+      headers.set('content-type', asset.notification_preview_mime_type || 'image/jpeg');
+      headers.set('content-length', String(asset.notification_preview_size_bytes || storedPreview.size));
+      headers.set('cache-control', 'private, max-age=86400');
+      headers.set('vary', 'Cookie');
+      headers.set('x-content-type-options', 'nosniff');
+      headers.set('x-mrnks-preview-source', 'r2-preview');
+      return new Response(storedPreview.body, { headers });
+    }
+  }
+
   const rawFormat = rawPreviewFormat(asset.original_filename, asset.original_mime_type);
 
   if (rawFormat) {
-    const descriptor = await findRawJpegPreview({
-      size: asset.original_size_bytes,
-      async read(offset: number, length: number): Promise<Uint8Array | null> {
-        return readOriginalBytes(env, asset, offset, length);
-      },
-    });
-    if (!descriptor || descriptor.offset + descriptor.length > asset.original_size_bytes) {
-      throw new HttpError(415, 'raw_preview_unavailable');
+    const extracted = await extractRawPreviewBytes(env, asset);
+    if (asset.original_storage_backend === 'nas') {
+      const previewKey = `previews/${asset.family_id}/${asset.id}/gallery.jpg`;
+      await env.MEDIA_BUCKET.put(previewKey, extracted.bytes, {
+        httpMetadata: { contentType: 'image/jpeg' },
+        customMetadata: { mediaAssetId: asset.id, purpose: 'gallery-preview' },
+      }).catch(() => undefined);
+      await env.DB.prepare(
+        `UPDATE media_assets
+            SET notification_preview_storage_key = ?, notification_preview_mime_type = 'image/jpeg',
+                notification_preview_size_bytes = ?
+          WHERE id = ? AND notification_preview_storage_key IS NULL`,
+      ).bind(previewKey, extracted.bytes.byteLength, asset.id).run().catch(() => undefined);
     }
-
-    const previewBytes = await readOriginalBytes(env, asset, descriptor.offset, descriptor.length);
-    if (!previewBytes) throw new HttpError(404, 'original_object_not_found');
-    const completeLength = findCompleteJpegLength(previewBytes);
-    if (previewBytes.byteLength !== descriptor.length || !completeLength) {
-      throw new HttpError(415, 'raw_preview_invalid');
-    }
-
-    const responseBytes = new Uint8Array(completeLength);
-    responseBytes.set(previewBytes.subarray(0, completeLength));
-    return new Response(responseBytes.buffer, {
+    const responseBody = extracted.bytes.buffer.slice(
+      extracted.bytes.byteOffset,
+      extracted.bytes.byteOffset + extracted.bytes.byteLength,
+    ) as ArrayBuffer;
+    return new Response(responseBody, {
       headers: {
         'content-type': 'image/jpeg',
-        'content-length': String(completeLength),
+        'content-length': String(extracted.bytes.byteLength),
         'cache-control': 'private, max-age=86400',
         'vary': 'Cookie',
         'x-content-type-options': 'nosniff',
-        'x-mrnks-preview-source': `embedded-${rawFormat}`,
+        'x-mrnks-preview-source': `embedded-${extracted.format}`,
       },
     });
   }

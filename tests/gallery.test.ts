@@ -386,8 +386,8 @@ function fakeCompleteUploadEnv(capture: CompleteUploadCapture): Env {
                   asset_id: 'ast_1',
                   family_id: 'fam_1',
                   uploader_user_id: 'usr_1',
-                  original_filename: 'DSC00001.ARW',
-                  original_mime_type: 'image/x-sony-arw',
+                  original_filename: 'sample.bin',
+                  original_mime_type: 'application/octet-stream',
                   original_size_bytes: 11,
                   original_storage_key: 'originals/fam_1/ast_1/original.arw',
                   client_last_modified_at: null,
@@ -1183,6 +1183,38 @@ describe('gallery and RAW previews', () => {
         expect.objectContaining({ method: 'GET' }),
       );
       expect(rangeCalls).toHaveLength(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('spec: serves the R2 gallery preview for a NAS original without touching the NAS', async () => {
+    const previewBytes = new Uint8Array([0xff, 0xd8, 0xff, 0xd9]);
+    const rangeCalls: Array<{ offset?: number; length?: number }> = [];
+    const gatewayFetch = vi.fn(async () => {
+      throw new Error('NAS must not be called when an R2 preview exists');
+    });
+    vi.stubGlobal('fetch', gatewayFetch);
+    try {
+      const env = fakeGalleryEnv(new Uint8Array(), new Uint8Array(), rangeCalls, [], {
+        original_filename: 'sample.arw',
+        original_mime_type: 'image/x-sony-arw',
+        original_size_bytes: 1234,
+        original_storage_key: 'originals/fam_1/ast_1/original.arw',
+        original_storage_backend: 'nas',
+        notification_preview_storage_key: 'previews/fam_1/ast_1/gallery.jpg',
+      }, previewBytes);
+      Object.assign(env, {
+        NAS_STORAGE_ORIGIN: 'https://mrnks-storage.pochimo.com',
+        NAS_STORAGE_SECRET: 'test-nas-secret',
+      });
+      const response = await worker.fetch(new Request('https://mrnks.2-38.com/api/media/ast_1/preview', {
+        headers: { cookie: 'mrnks_session=test-token' },
+      }), env);
+      expect(response.status).toBe(200);
+      expect(response.headers.get('content-type')).toBe('image/jpeg');
+      expect(new Uint8Array(await response.arrayBuffer())).toEqual(previewBytes);
+      expect(gatewayFetch).not.toHaveBeenCalled();
     } finally {
       vi.unstubAllGlobals();
     }
