@@ -502,14 +502,14 @@ interface DeleteCapture {
   deletedKeys: string[];
   runs: Array<{ sql: string; values: unknown[] }>;
   operations?: string[];
-  storageFailures?: number;
   batchFailure?: boolean;
-  pendingJob?: {
+  trashRows?: Array<Record<string, unknown>>;
+  legacyDeletionJob?: {
     asset_id: string;
     original_storage_key: string;
-    original_storage_backend?: 'r2' | 'nas';
+    original_storage_backend: 'r2' | 'nas';
     notification_preview_storage_key: string | null;
-  } | null;
+  };
 }
 
 function fakeDeleteEnv(
@@ -518,6 +518,7 @@ function fakeDeleteEnv(
   assetExists = true,
   assetFamilyId = 'fam_1',
   storageBackend: 'r2' | 'nas' = 'r2',
+  assetTrashedAt: string | null = null,
 ): Env {
   const db = {
     prepare(sql: string) {
@@ -539,9 +540,22 @@ function fakeDeleteEnv(
                 return {
                   id: 'ast_1',
                   family_id: assetFamilyId,
+                  type: 'other',
+                  original_filename: 'sample.arw',
+                  original_mime_type: 'image/x-sony-arw',
+                  original_size_bytes: 1234,
+                  original_sha256: 'sha256-fixture',
                   original_storage_key: 'originals/fam_1/ast_1/sample.arw',
                   original_storage_backend: storageBackend,
                   notification_preview_storage_key: 'previews/fam_1/ast_1/line.jpg',
+                  notification_preview_mime_type: 'image/jpeg',
+                  notification_preview_size_bytes: 321,
+                  captured_at: null,
+                  client_last_modified_at: null,
+                  uploaded_at: '2026-07-12T00:00:00.000Z',
+                  processing_status: 'ready',
+                  trashed_at: assetTrashedAt,
+                  trashed_by_user_id: assetTrashedAt ? 'usr_1' : null,
                 } as T;
               }
               return null;
@@ -550,23 +564,15 @@ function fakeDeleteEnv(
               if (sql.includes('FROM family_members fm')) {
                 return { results: [{ id: 'fam_1', name: '家族', role }] as T[] };
               }
+              if (sql.includes('FROM media_assets')) return { results: (capture.trashRows ?? []) as T[] };
               if (sql.includes('FROM media_deletion_jobs')) {
-                return { results: (capture.pendingJob ? [capture.pendingJob] : []) as T[] };
+                return { results: (capture.legacyDeletionJob ? [capture.legacyDeletionJob] : []) as T[] };
               }
               return { results: [] as T[] };
             },
             async run() {
               capture.runs.push({ sql, values });
               capture.operations?.push('db:' + sql.replace(/\s+/g, ' ').trim().split(' ').slice(0, 3).join(' '));
-              if (sql.includes('INSERT INTO media_deletion_jobs')) {
-                capture.pendingJob = {
-                  asset_id: String(values[0]),
-                  original_storage_key: String(values[1]),
-                  original_storage_backend: values[2] === 'nas' ? 'nas' : 'r2',
-                  notification_preview_storage_key: values[3] == null ? null : String(values[3]),
-                };
-              }
-              if (sql.includes('DELETE FROM media_deletion_jobs')) capture.pendingJob = null;
               return { success: true, meta: { changes: 1 } };
             },
           };
@@ -582,10 +588,6 @@ function fakeDeleteEnv(
   const bucket = {
     async delete(keys: string | string[]) {
       capture.operations?.push('r2:delete');
-      if ((capture.storageFailures ?? 0) > 0) {
-        capture.storageFailures = (capture.storageFailures ?? 0) - 1;
-        throw new Error('r2_unavailable');
-      }
       capture.deletedKeys.push(...(Array.isArray(keys) ? keys : [keys]));
     },
   } as unknown as R2Bucket;
@@ -806,7 +808,7 @@ describe('gallery and RAW previews', () => {
   });
 
   it.each(['owner', 'admin', 'uploader'] as const)(
-    'lets a %s permanently delete family media and its stored objects',
+    'spec: %s moves family media to an indefinite trash without deleting stored objects',
     async (role) => {
       const capture: DeleteCapture = { deletedKeys: [], runs: [], operations: [] };
       const res = await worker.fetch(new Request('https://mrnks.2-38.com/api/media/ast_1', {
@@ -815,121 +817,122 @@ describe('gallery and RAW previews', () => {
       }), fakeDeleteEnv(role, capture));
 
       expect(res.status).toBe(200);
-      await expect(res.json()).resolves.toEqual({ ok: true, assetId: 'ast_1' });
-      expect(capture.deletedKeys).toEqual([
-        'originals/fam_1/ast_1/sample.arw',
-        'previews/fam_1/ast_1/line.jpg',
-      ]);
+      await expect(res.json()).resolves.toEqual({
+        ok: true,
+        assetId: 'ast_1',
+        trashed: true,
+        trashedAt: expect.any(String),
+      });
+      expect(capture.deletedKeys).toEqual([]);
       expect(capture.runs.map(({ sql }) => sql)).toEqual([
-        expect.stringContaining('INSERT INTO media_deletion_jobs'),
+        expect.stringContaining('UPDATE media_assets'),
         expect.stringContaining('DELETE FROM line_notification_deliveries'),
         expect.stringContaining('DELETE FROM download_tokens'),
-        expect.stringContaining('DELETE FROM media_assets'),
-        expect.stringContaining('DELETE FROM media_deletion_jobs'),
       ]);
-      expect(capture.operations).toEqual([
-        'db:INSERT INTO media_deletion_jobs',
-        'db:DELETE FROM line_notification_deliveries',
-        'db:DELETE FROM download_tokens',
-        'db:DELETE FROM media_assets',
-        'r2:delete',
-        'db:DELETE FROM media_deletion_jobs',
-      ]);
+      expect(capture.runs[0]?.sql).toContain('trashed_at');
+      expect(capture.runs[0]?.sql).toContain('trashed_by_user_id');
+      expect(capture.runs.every(({ sql }) => !sql.includes('media_deletion_jobs'))).toBe(true);
+      expect(capture.runs.every(({ sql }) => !sql.includes('DELETE FROM media_assets'))).toBe(true);
+      expect(capture.operations).not.toContain('r2:delete');
     },
   );
 
-  it('spec: deletes a NAS original through the signed gateway and only deletes its preview from R2', async () => {
-    const capture: DeleteCapture = { deletedKeys: [], runs: [] };
-    const gatewayFetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
-      expect(init?.method).toBe('DELETE');
-      expect(new Headers(init?.headers).get('authorization')).toMatch(/^Bearer /);
-      return new Response(null, { status: 204 });
-    });
-    vi.stubGlobal('fetch', gatewayFetch);
-    try {
-      const response = await worker.fetch(new Request('https://mrnks.2-38.com/api/media/ast_1', {
-        method: 'DELETE',
+  it.each(['owner', 'admin', 'uploader'] as const)(
+    'spec: %s can restore trashed media without rewriting its stored objects',
+    async (role) => {
+      const capture: DeleteCapture = { deletedKeys: [], runs: [], operations: [] };
+      const res = await worker.fetch(new Request('https://mrnks.2-38.com/api/media/ast_1/restore', {
+        method: 'POST',
         headers: { cookie: 'mrnks_session=test-token' },
-      }), fakeDeleteEnv('owner', capture, true, 'fam_1', 'nas'));
+      }), fakeDeleteEnv(role, capture, true, 'fam_1', 'nas', '2026-07-12T00:00:00.000Z'));
 
-      expect(response.status).toBe(200);
-      expect(gatewayFetch).toHaveBeenCalledWith(
-        'https://upload.mrnks.2-38.com/v1/objects/ast_1',
-        expect.objectContaining({ method: 'DELETE' }),
-      );
-      expect(capture.deletedKeys).toEqual(['previews/fam_1/ast_1/line.jpg']);
-      expect(capture.pendingJob).toBeNull();
-    } finally {
-      vi.unstubAllGlobals();
-    }
-  });
+      expect(res.status).toBe(200);
+      await expect(res.json()).resolves.toEqual({ ok: true, assetId: 'ast_1', restored: true });
+      expect(capture.deletedKeys).toEqual([]);
+      expect(capture.runs).toHaveLength(1);
+      expect(capture.runs[0]?.sql).toContain('trashed_at = NULL');
+      expect(capture.runs[0]?.sql).toContain('trashed_by_user_id = NULL');
+      expect(capture.operations).not.toContain('r2:delete');
+    },
+  );
 
-  it('does not touch R2 when the atomic D1 deletion batch fails', async () => {
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  it('spec: lists only trashed media for editors with a trash-scoped preview URL', async () => {
     const capture: DeleteCapture = {
       deletedKeys: [],
       runs: [],
-      operations: [],
-      batchFailure: true,
+      trashRows: [{
+        id: 'ast_1',
+        type: 'other',
+        original_filename: 'sample.arw',
+        original_mime_type: 'image/x-sony-arw',
+        original_size_bytes: 1234,
+        original_sha256: 'sha256-fixture',
+        captured_at: null,
+        client_last_modified_at: null,
+        uploaded_at: '2026-07-12T00:00:00.000Z',
+        processing_status: 'ready',
+        trashed_at: '2026-07-12T03:04:05.000Z',
+      }],
     };
-    const res = await worker.fetch(new Request('https://mrnks.2-38.com/api/media/ast_1', {
-      method: 'DELETE',
+    const res = await worker.fetch(new Request('https://mrnks.2-38.com/api/families/fam_1/trash', {
       headers: { cookie: 'mrnks_session=test-token' },
     }), fakeDeleteEnv('owner', capture));
 
-    expect(res.status).toBe(500);
-    expect(capture.deletedKeys).toEqual([]);
-    expect(capture.operations).toEqual([]);
-    expect(capture.pendingJob).toBeUndefined();
-    errorSpy.mockRestore();
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({
+      assets: [expect.objectContaining({
+        id: 'ast_1',
+        originalFilename: 'sample.arw',
+        trashedAt: '2026-07-12T03:04:05.000Z',
+        previewUrl: '/api/media/ast_1/preview?trash=1',
+      })],
+    });
   });
 
-  it('keeps a durable deletion job when R2 is unavailable and retries it on schedule', async () => {
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  it('spec: a trashed asset is hidden from normal preview access but remains previewable to an editor from trash', async () => {
+    const trashedAt = '2026-07-12T03:04:05.000Z';
+    const fixture = createDngHeaderFixture();
+    const hidden = await worker.fetch(
+      new Request('https://mrnks.2-38.com/api/media/ast_1/preview', {
+        headers: { cookie: 'mrnks_session=test-token' },
+      }),
+      fakeGalleryEnv(fixture, new Uint8Array(), [], [], { trashed_at: trashedAt }, fixture),
+    );
+    expect(hidden.status).toBe(404);
+
+    const visible = await worker.fetch(
+      new Request('https://mrnks.2-38.com/api/media/ast_1/preview?trash=1', {
+        headers: { cookie: 'mrnks_session=test-token' },
+      }),
+      fakeGalleryEnv(fixture, new Uint8Array(), [], [], { trashed_at: trashedAt }, fixture),
+    );
+    expect(visible.status).toBe(200);
+  });
+
+  it('spec: scheduled maintenance never permanently deletes legacy queued media', async () => {
     const capture: DeleteCapture = {
       deletedKeys: [],
       runs: [],
       operations: [],
-      storageFailures: 1,
+      legacyDeletionJob: {
+        asset_id: 'ast_1',
+        original_storage_key: 'originals/fam_1/ast_1/sample.arw',
+        original_storage_backend: 'r2',
+        notification_preview_storage_key: 'previews/fam_1/ast_1/line.jpg',
+      },
     };
-    const env = fakeDeleteEnv('owner', capture);
-    const res = await worker.fetch(new Request('https://mrnks.2-38.com/api/media/ast_1', {
-      method: 'DELETE',
-      headers: { cookie: 'mrnks_session=test-token' },
-    }), env);
-
-    expect(res.status).toBe(202);
-    await expect(res.json()).resolves.toEqual({ ok: true, assetId: 'ast_1', storagePending: true });
-    expect(capture.pendingJob).toEqual({
-      asset_id: 'ast_1',
-      original_storage_key: 'originals/fam_1/ast_1/sample.arw',
-      original_storage_backend: 'r2',
-      notification_preview_storage_key: 'previews/fam_1/ast_1/line.jpg',
-    });
-    expect(capture.deletedKeys).toEqual([]);
-    expect(capture.runs.map(({ sql }) => sql)).toEqual([
-      expect.stringContaining('INSERT INTO media_deletion_jobs'),
-      expect.stringContaining('DELETE FROM line_notification_deliveries'),
-      expect.stringContaining('DELETE FROM download_tokens'),
-      expect.stringContaining('DELETE FROM media_assets'),
-      expect.stringContaining('UPDATE media_deletion_jobs'),
-    ]);
-
     const scheduledPromises: Promise<unknown>[] = [];
     const ctx = {
       waitUntil(promise: Promise<unknown>) { scheduledPromises.push(promise); },
       passThroughOnException() {},
     } as unknown as ExecutionContext;
-    worker.scheduled({} as ScheduledController, env, ctx);
+
+    worker.scheduled({} as ScheduledController, fakeDeleteEnv('owner', capture), ctx);
     await Promise.all(scheduledPromises);
 
-    expect(capture.deletedKeys).toEqual([
-      'originals/fam_1/ast_1/sample.arw',
-      'previews/fam_1/ast_1/line.jpg',
-    ]);
-    expect(capture.pendingJob).toBeNull();
-    expect(capture.runs.at(-1)?.sql).toContain('DELETE FROM media_deletion_jobs');
-    warnSpy.mockRestore();
+    expect(capture.deletedKeys).toEqual([]);
+    expect(capture.operations).not.toContain('r2:delete');
+    expect(capture.runs.every(({ sql }) => !sql.includes('DELETE FROM media_deletion_jobs'))).toBe(true);
   });
 
   it('does not let a viewer delete family media or touch R2', async () => {

@@ -135,17 +135,28 @@ describe('public Worker routes', () => {
     expect(galleryRenderer).not.toContain("document.createElement('video')");
   });
 
-  it('shows permanent deletion only to editors and requires explicit confirmation', async () => {
+  it('shows indefinite trash and restore controls only to editors', async () => {
     const res = await worker.fetch(new Request('https://mrnks.2-38.com/'), fakeEnv());
     const html = await res.text();
 
     expect(html).toContain('id="galleryDeleteButton"');
     expect(html).toContain('id="deleteMediaDialog"');
     expect(html).toContain('id="deleteMediaConfirmButton"');
-    expect(html).toContain('元に戻せません');
+    expect(html).toContain('id="trashButton"');
+    expect(html).toContain('id="trashDialog"');
+    expect(html).toContain('id="trashList"');
+    expect(html).toContain('期限なく保持');
+    expect(html).toContain('ゴミ箱へ移動');
+    expect(html).toContain('復元');
+    expect(html).not.toContain('元に戻せません');
+    expect(html).not.toContain('完全に削除');
     expect(html).toContain("$('galleryDeleteButton').hidden = !state.canUpload");
+    expect(html).toContain("$('trashButton').hidden = !canUpload");
     expect(html).toContain("method: 'DELETE'");
-    expect(html).toContain('async function deleteActiveMedia');
+    expect(html).toContain("method: 'POST'");
+    expect(html).toContain("+ '/restore'");
+    expect(html).toContain('async function trashActiveMedia');
+    expect(html).toContain('async function restoreTrashItem');
     expect(html).toContain("openDialog($('deleteMediaDialog'))");
     expect(html).toContain("$('deleteMediaCancelButton').focus()");
     expect(html).not.toContain("$('deleteMediaConfirmButton').focus()");
@@ -153,6 +164,7 @@ describe('public Worker routes', () => {
     expect(html).toContain("if (state.deleteInProgress) event.preventDefault()");
     expect(html).toContain('button.dataset.assetId = item.id');
     expect(html).toContain('focusAfterMediaDelete(nextFocusAssetId)');
-    expect(html).toContain('id="albumTitle" tabindex="-1"');
+    expect(html).toContain('id="albumTitle" class="visually-hidden" tabindex="-1"');
+    expect(html).toContain('id="albumCount"');
   });
 });

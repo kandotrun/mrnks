@@ -144,13 +144,7 @@ interface StoredMediaAsset {
   notification_preview_storage_key: string | null;
   notification_preview_mime_type: string | null;
   notification_preview_size_bytes: number | null;
-}
-
-interface MediaDeletionJob {
-  asset_id: string;
-  original_storage_key: string;
-  original_storage_backend: 'r2' | 'nas';
-  notification_preview_storage_key: string | null;
+  trashed_at: string | null;
 }
 
 const worker = {
@@ -165,8 +159,8 @@ const worker = {
       return jsonResponse({ error: 'internal_error' }, { status: 500 });
     }
   },
-  scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): void {
-    ctx.waitUntil(processPendingMediaDeletions(env));
+  scheduled(_controller: ScheduledController, _env: Env, _ctx: ExecutionContext): void {
+    // Intentionally no-op. User-initiated deletion is an indefinite, restorable trash state.
   },
 };
 
@@ -204,6 +198,14 @@ async function route(request: Request, env: Env, ctx?: ExecutionContext): Promis
   const familyMediaMatch = path.match(/^\/api\/families\/([^/]+)\/media$/);
   if (familyMediaMatch && request.method === 'GET') return handleListMedia(request, env, decodeURIComponent(familyMediaMatch[1]));
   if (familyMediaMatch && request.method === 'PUT') return handleUploadMedia(request, env, decodeURIComponent(familyMediaMatch[1]), ctx);
+
+  const familyTrashMatch = path.match(/^\/api\/families\/([^/]+)\/trash$/);
+  if (familyTrashMatch && request.method === 'GET') return handleListTrash(request, env, decodeURIComponent(familyTrashMatch[1]));
+
+  const mediaRestoreMatch = path.match(/^\/api\/media\/([^/]+)\/restore$/);
+  if (mediaRestoreMatch && request.method === 'POST') {
+    return handleRestoreMedia(request, env, decodeURIComponent(mediaRestoreMatch[1]));
+  }
 
   const mediaAssetMatch = path.match(/^\/api\/media\/([^/]+)$/);
   if (mediaAssetMatch && request.method === 'DELETE') {
@@ -811,7 +813,7 @@ async function handleListMedia(request: Request, env: Env, familyId: string): Pr
             captured_at, client_last_modified_at, uploaded_at, processing_status,
             COUNT(*) OVER () AS total_count
        FROM media_assets
-      WHERE family_id = ?
+      WHERE family_id = ? AND trashed_at IS NULL
       ORDER BY COALESCE(captured_at, client_last_modified_at, uploaded_at) DESC, uploaded_at DESC, id DESC
       LIMIT ? OFFSET ?`,
   ).bind(familyId, MEDIA_PAGE_SIZE + 1, offset).all<{
@@ -851,123 +853,116 @@ async function handleListMedia(request: Request, env: Env, familyId: string): Pr
   });
 }
 
-async function loadAuthorizedMediaAsset(request: Request, env: Env, assetId: string): Promise<StoredMediaAsset> {
+async function handleListTrash(request: Request, env: Env, familyId: string): Promise<Response> {
+  const user = await requireUser(request, env);
+  await requireFamilyRole(user, familyId, ['owner', 'admin', 'uploader']);
+  const rows = await env.DB.prepare(
+    `SELECT id, type, original_filename, original_mime_type, original_size_bytes, original_sha256,
+            captured_at, client_last_modified_at, uploaded_at, processing_status, trashed_at
+       FROM media_assets
+      WHERE family_id = ? AND trashed_at IS NOT NULL
+      ORDER BY trashed_at DESC, id DESC`,
+  ).bind(familyId).all<{
+    id: string;
+    type: string;
+    original_filename: string;
+    original_mime_type: string;
+    original_size_bytes: number;
+    original_sha256: string;
+    captured_at: string | null;
+    client_last_modified_at: string | null;
+    uploaded_at: string;
+    processing_status: string;
+    trashed_at: string;
+  }>();
+
+  return jsonResponse({
+    assets: (rows.results || []).map((row) => ({
+      id: row.id,
+      type: row.type,
+      originalFilename: row.original_filename,
+      mimeType: row.original_mime_type,
+      sizeBytes: row.original_size_bytes,
+      sha256: row.original_sha256,
+      capturedAt: row.captured_at,
+      clientLastModifiedAt: row.client_last_modified_at,
+      uploadedAt: row.uploaded_at,
+      processingStatus: row.processing_status,
+      trashedAt: row.trashed_at,
+      previewUrl: `/api/media/${encodeURIComponent(row.id)}/preview?trash=1`,
+    })),
+  });
+}
+
+async function loadAuthorizedMediaAsset(
+  request: Request,
+  env: Env,
+  assetId: string,
+  options: { allowTrashed?: boolean } = {},
+): Promise<StoredMediaAsset> {
   const user = await requireUser(request, env);
   const asset = await env.DB.prepare(
     `SELECT id, family_id, type, original_filename, original_mime_type, original_size_bytes,
             original_storage_key, original_storage_backend,
-            notification_preview_storage_key, notification_preview_mime_type, notification_preview_size_bytes
+            notification_preview_storage_key, notification_preview_mime_type, notification_preview_size_bytes,
+            trashed_at
        FROM media_assets
       WHERE id = ?
       LIMIT 1`,
   ).bind(assetId).first<StoredMediaAsset>();
   if (!asset) throw new HttpError(404, 'asset_not_found');
-  await requireFamilyRole(user, asset.family_id, ['owner', 'admin', 'uploader', 'viewer']);
+  if (asset.trashed_at) {
+    if (!options.allowTrashed) throw new HttpError(404, 'asset_not_found');
+    await requireFamilyRole(user, asset.family_id, ['owner', 'admin', 'uploader']);
+  } else {
+    await requireFamilyRole(user, asset.family_id, ['owner', 'admin', 'uploader', 'viewer']);
+  }
   return asset;
 }
 
 async function handleDeleteMedia(request: Request, env: Env, assetId: string): Promise<Response> {
   const user = await requireUser(request, env);
   const asset = await env.DB.prepare(
-    `SELECT id, family_id, original_storage_key, original_storage_backend, notification_preview_storage_key
+    `SELECT id, family_id, trashed_at
        FROM media_assets
       WHERE id = ?
       LIMIT 1`,
-  ).bind(assetId).first<{
-    id: string;
-    family_id: string;
-    original_storage_key: string;
-    original_storage_backend: 'r2' | 'nas';
-    notification_preview_storage_key: string | null;
-  }>();
+  ).bind(assetId).first<{ id: string; family_id: string; trashed_at: string | null }>();
   if (!asset) throw new HttpError(404, 'asset_not_found');
   await requireFamilyRole(user, asset.family_id, ['owner', 'admin', 'uploader']);
 
-  const timestamp = nowIso();
+  const trashedAt = asset.trashed_at || nowIso();
   await env.DB.batch([
     env.DB.prepare(
-      `INSERT INTO media_deletion_jobs (
-        asset_id, original_storage_key, original_storage_backend, notification_preview_storage_key,
-        attempts, last_error, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, 0, NULL, ?, ?)
-      ON CONFLICT(asset_id) DO NOTHING`,
-    ).bind(
-      asset.id,
-      asset.original_storage_key,
-      asset.original_storage_backend,
-      asset.notification_preview_storage_key,
-      timestamp,
-      timestamp,
-    ),
+      `UPDATE media_assets
+          SET trashed_at = ?, trashed_by_user_id = ?
+        WHERE id = ? AND trashed_at IS NULL`,
+    ).bind(trashedAt, user.id, asset.id),
     env.DB.prepare('DELETE FROM line_notification_deliveries WHERE media_asset_id = ?').bind(asset.id),
     env.DB.prepare('DELETE FROM download_tokens WHERE media_asset_id = ?').bind(asset.id),
-    env.DB.prepare('DELETE FROM media_assets WHERE id = ?').bind(asset.id),
   ]);
 
-  const storageDeleted = await processMediaDeletionJob(env, {
-    asset_id: asset.id,
-    original_storage_key: asset.original_storage_key,
-    original_storage_backend: asset.original_storage_backend,
-    notification_preview_storage_key: asset.notification_preview_storage_key,
-  });
-  if (!storageDeleted) {
-    return jsonResponse({ ok: true, assetId: asset.id, storagePending: true }, { status: 202 });
+  return jsonResponse({ ok: true, assetId: asset.id, trashed: true, trashedAt });
+}
+
+async function handleRestoreMedia(request: Request, env: Env, assetId: string): Promise<Response> {
+  const user = await requireUser(request, env);
+  const asset = await env.DB.prepare(
+    `SELECT id, family_id, trashed_at
+       FROM media_assets
+      WHERE id = ?
+      LIMIT 1`,
+  ).bind(assetId).first<{ id: string; family_id: string; trashed_at: string | null }>();
+  if (!asset) throw new HttpError(404, 'asset_not_found');
+  await requireFamilyRole(user, asset.family_id, ['owner', 'admin', 'uploader']);
+  if (asset.trashed_at) {
+    await env.DB.prepare(
+      `UPDATE media_assets
+          SET trashed_at = NULL, trashed_by_user_id = NULL
+        WHERE id = ? AND trashed_at IS NOT NULL`,
+    ).bind(asset.id).run();
   }
-  return jsonResponse({ ok: true, assetId: asset.id });
-}
-
-async function deleteNasOriginal(env: Env, job: MediaDeletionJob): Promise<void> {
-  if (!env.NAS_STORAGE_ORIGIN || !env.NAS_STORAGE_SECRET) throw new Error('nas_storage_unavailable');
-  const token = await signNasToken({
-    v: 1,
-    action: 'delete',
-    assetId: job.asset_id,
-    key: job.original_storage_key,
-    exp: Math.floor(Date.now() / 1000) + 5 * 60,
-  }, env.NAS_STORAGE_SECRET);
-  const response = await fetch(
-    `${env.NAS_STORAGE_ORIGIN.replace(/\/$/, '')}/v1/objects/${encodeURIComponent(job.asset_id)}`,
-    { method: 'DELETE', headers: { authorization: `Bearer ${token}` } },
-  );
-  if (!response.ok && response.status !== 404) throw new Error(`nas_delete_failed:${response.status}`);
-}
-
-async function processMediaDeletionJob(env: Env, job: MediaDeletionJob): Promise<boolean> {
-  try {
-    if (job.original_storage_backend === 'nas') {
-      await deleteNasOriginal(env, job);
-      if (job.notification_preview_storage_key) await env.MEDIA_BUCKET.delete(job.notification_preview_storage_key);
-    } else {
-      const storageKeys = [job.original_storage_key];
-      if (job.notification_preview_storage_key) storageKeys.push(job.notification_preview_storage_key);
-      await env.MEDIA_BUCKET.delete(storageKeys);
-    }
-    await env.DB.prepare('DELETE FROM media_deletion_jobs WHERE asset_id = ?').bind(job.asset_id).run();
-    return true;
-  } catch (error) {
-    const message = (error instanceof Error ? error.message : String(error)).slice(0, 500);
-    console.warn('media deletion pending', job.asset_id, message);
-    try {
-      await env.DB.prepare(
-        `UPDATE media_deletion_jobs
-            SET attempts = attempts + 1, last_error = ?, updated_at = ?
-          WHERE asset_id = ?`,
-      ).bind(message, nowIso(), job.asset_id).run();
-    } catch (updateError) {
-      console.error('failed to record media deletion retry', job.asset_id, updateError instanceof Error ? updateError.message : String(updateError));
-    }
-    return false;
-  }
-}
-
-async function processPendingMediaDeletions(env: Env): Promise<void> {
-  const jobs = await env.DB.prepare(
-    `SELECT asset_id, original_storage_key, original_storage_backend, notification_preview_storage_key
-       FROM media_deletion_jobs
-      ORDER BY created_at ASC
-      LIMIT ?`,
-  ).bind(20).all<MediaDeletionJob>();
-  await Promise.all((jobs.results ?? []).map((job) => processMediaDeletionJob(env, job)));
+  return jsonResponse({ ok: true, assetId: asset.id, restored: true });
 }
 
 async function handleLineNotificationPreview(env: Env, assetId: string, token: string): Promise<Response> {
@@ -978,7 +973,7 @@ async function handleLineNotificationPreview(env: Env, assetId: string, token: s
     `SELECT notification_preview_storage_key, notification_preview_mime_type,
             notification_preview_size_bytes
        FROM media_assets
-      WHERE id = ?
+      WHERE id = ? AND trashed_at IS NULL
       LIMIT 1`,
   ).bind(assetId).first<{
     notification_preview_storage_key: string | null;
@@ -1100,7 +1095,8 @@ async function extractRawPreviewBytes(env: Env, asset: OriginalAsset): Promise<{
 }
 
 async function handleMediaPreview(request: Request, env: Env, assetId: string): Promise<Response> {
-  const asset = await loadAuthorizedMediaAsset(request, env, assetId);
+  const allowTrashed = new URL(request.url).searchParams.get('trash') === '1';
+  const asset = await loadAuthorizedMediaAsset(request, env, assetId, { allowTrashed });
 
   if (asset.notification_preview_storage_key) {
     const storedPreview = await env.MEDIA_BUCKET.get(asset.notification_preview_storage_key);
@@ -1209,7 +1205,9 @@ async function handleMediaContent(request: Request, env: Env, assetId: string): 
 async function handleCreateDownloadUrl(request: Request, env: Env, assetId: string): Promise<Response> {
   const user = await requireUser(request, env);
   const asset = await env.DB.prepare(
-    `SELECT id, family_id, original_filename FROM media_assets WHERE id = ?`,
+    `SELECT id, family_id, original_filename
+       FROM media_assets
+      WHERE id = ? AND trashed_at IS NULL`,
   ).bind(assetId).first<{ id: string; family_id: string; original_filename: string }>();
   if (!asset) return jsonResponse({ error: 'asset_not_found' }, { status: 404 });
   await requireFamilyRole(user, asset.family_id, ['owner', 'admin', 'uploader', 'viewer']);
@@ -1235,7 +1233,7 @@ async function handleDownload(request: Request, env: Env, token: string): Promis
             m.original_filename, m.original_mime_type, m.original_size_bytes, d.expires_at
        FROM download_tokens d
        JOIN media_assets m ON m.id = d.media_asset_id
-      WHERE d.token_hash = ?
+      WHERE d.token_hash = ? AND m.trashed_at IS NULL
       LIMIT 1`,
   ).bind(tokenHash).first<{
     id: string;

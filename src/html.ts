@@ -25,6 +25,17 @@ export function renderAppHtml(): string {
       --success-bottom: #51a351;
     }
     * { box-sizing: border-box; }
+    .visually-hidden {
+      position: absolute !important;
+      width: 1px !important;
+      height: 1px !important;
+      margin: -1px !important;
+      padding: 0 !important;
+      overflow: hidden !important;
+      border: 0 !important;
+      clip: rect(0 0 0 0) !important;
+      white-space: nowrap !important;
+    }
     html { background: var(--body-bg); }
     body {
       margin: 0;
@@ -710,8 +721,8 @@ export function renderAppHtml(): string {
     }
     .gallery-heading {
       display: flex;
-      margin-bottom: 22px;
-      align-items: flex-end;
+      margin-bottom: 18px;
+      align-items: center;
       justify-content: space-between;
       gap: 16px;
     }
@@ -722,7 +733,7 @@ export function renderAppHtml(): string {
       line-height: 1.2;
       letter-spacing: -.04em;
     }
-    .gallery-summary { margin: 6px 0 0; color: var(--app-muted); font-size: 13px; }
+    .gallery-summary { margin: 0; color: var(--app-muted); font-size: 13px; }
     .album-count { color: inherit; background: transparent; padding: 0; font-size: inherit; font-weight: 700; }
     .gallery-days { display: grid; gap: 30px; }
     .gallery-day-heading {
@@ -894,13 +905,33 @@ export function renderAppHtml(): string {
     .settings-dialog .sheet-body { padding-top: 18px; }
     .settings-dialog .form-control { min-height: 44px; border-color: #cfd6d0; border-radius: 10px; }
     .settings-dialog .checkbox-row { align-items: flex-start; line-height: 1.5; }
+    .trash-note { margin: 0 0 16px; color: var(--app-muted); font-size: 13px; line-height: 1.65; }
+    .trash-list { display: grid; gap: 10px; }
+    .trash-empty { padding: 28px 16px; border: 1px dashed #cfd6d0; border-radius: 14px; color: var(--app-muted); text-align: center; }
+    .trash-item {
+      display: grid;
+      grid-template-columns: 72px minmax(0, 1fr) auto;
+      padding: 10px;
+      align-items: center;
+      gap: 12px;
+      border: 1px solid var(--app-line);
+      border-radius: 14px;
+      background: #ffffff;
+    }
+    .trash-thumb-wrap { position: relative; width: 72px; height: 72px; overflow: hidden; border-radius: 10px; background: #e6eae7; }
+    .trash-thumb { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+    .trash-placeholder { display: grid; width: 100%; height: 100%; place-items: center; color: #657068; font-size: 10px; font-weight: 800; }
+    .trash-copy { min-width: 0; }
+    .trash-name { overflow: hidden; margin: 0; font-size: 13px; font-weight: 750; text-overflow: ellipsis; white-space: nowrap; }
+    .trash-meta { margin: 4px 0 0; color: var(--app-muted); font-size: 11px; line-height: 1.45; }
+    .trash-restore { white-space: nowrap; }
     @media (max-width: 979px) {
       .gallery-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
     }
     @media (max-width: 767px) {
       .app-header-inner { min-height: 58px; padding-right: 14px; padding-left: 16px; }
-      .gallery-main { padding: 20px 0 max(112px, calc(82px + env(safe-area-inset-bottom))); }
-      .gallery-heading { padding: 0 16px; align-items: center; }
+      .gallery-main { padding: 16px 0 max(112px, calc(82px + env(safe-area-inset-bottom))); }
+      .gallery-heading { margin-bottom: 12px; padding: 0 16px; align-items: center; }
       .gallery-heading .quiet-action { display: none; }
       .gallery-days { gap: 22px; }
       .gallery-day-heading { top: 58px; margin-bottom: 3px; padding: 9px 16px 7px; }
@@ -916,6 +947,9 @@ export function renderAppHtml(): string {
       }
       .sheet-body { padding-right: 18px; padding-left: 18px; }
       .fab { right: max(18px, env(safe-area-inset-right)); }
+      .trash-item { grid-template-columns: 58px minmax(0, 1fr); }
+      .trash-thumb-wrap { width: 58px; height: 58px; }
+      .trash-restore { grid-column: 1 / -1; width: 100%; }
     }
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; }
@@ -946,6 +980,7 @@ export function renderAppHtml(): string {
           <p id="userText" class="user-menu-name">LINE user</p>
           <p id="userMeta" class="user-menu-meta">家族アルバム</p>
           <div class="user-menu-actions">
+            <button id="trashButton" class="secondary-action" type="button" role="menuitem" hidden>ゴミ箱</button>
             <button id="logoutButton" class="secondary-action" type="button" role="menuitem">ログアウト</button>
           </div>
         </div>
@@ -957,7 +992,7 @@ export function renderAppHtml(): string {
     <section id="album" aria-labelledby="albumTitle">
       <div class="gallery-heading">
         <div>
-          <h1 id="albumTitle" tabindex="-1">家族アルバム</h1>
+          <h1 id="albumTitle" class="visually-hidden" tabindex="-1">家族アルバム</h1>
           <p class="gallery-summary"><span id="albumCount" class="album-count" role="status" aria-live="polite" aria-label="表示件数 0件">0件</span>を保存しています</p>
         </div>
         <button id="loadMediaButton" class="quiet-action" type="button">一覧を更新</button>
@@ -1028,6 +1063,20 @@ export function renderAppHtml(): string {
   </div>
 </dialog>
 
+<dialog id="trashDialog" class="settings-dialog" aria-modal="true" aria-labelledby="trashTitle">
+  <div class="sheet-body">
+    <header class="sheet-header">
+      <div>
+        <h2 id="trashTitle">ゴミ箱</h2>
+        <p>アルバムから外した写真・動画を復元できます。</p>
+      </div>
+      <button id="trashCloseButton" class="sheet-close" type="button" aria-label="ゴミ箱を閉じる">×</button>
+    </header>
+    <p class="trash-note">ゴミ箱の原本とプレビューは期限なく保持され、自動で完全削除されません。</p>
+    <div id="trashList" class="trash-list" aria-live="polite"></div>
+  </div>
+</dialog>
+
 <dialog id="galleryDialog" class="gallery-dialog" role="dialog" aria-modal="true" aria-labelledby="galleryTitle">
   <div class="gallery-dialog-shell">
     <header class="gallery-dialog-topbar">
@@ -1044,7 +1093,7 @@ export function renderAppHtml(): string {
         <div id="galleryMetaSecondary" class="gallery-meta-secondary"></div>
       </div>
       <div class="gallery-actions">
-        <button id="galleryDeleteButton" class="btn gallery-delete" type="button" hidden>削除</button>
+        <button id="galleryDeleteButton" class="btn gallery-delete" type="button" hidden>ゴミ箱へ</button>
         <button id="galleryDownloadButton" class="btn btn-primary gallery-download" type="button">原本DL</button>
       </div>
     </footer>
@@ -1053,12 +1102,12 @@ export function renderAppHtml(): string {
 
 <dialog id="deleteMediaDialog" class="confirm-dialog" aria-modal="true" aria-labelledby="deleteMediaTitle" aria-describedby="deleteMediaDescription deleteMediaName">
   <div class="confirm-body">
-    <h2 id="deleteMediaTitle">この写真・動画を削除しますか？</h2>
-    <p id="deleteMediaDescription" class="confirm-description">原本とプレビューが削除され、元に戻せません。</p>
+    <h2 id="deleteMediaTitle">ゴミ箱へ移動しますか？</h2>
+    <p id="deleteMediaDescription" class="confirm-description">原本とプレビューは期限なく保持され、いつでも復元できます。</p>
     <p id="deleteMediaName" class="confirm-filename"></p>
     <div class="confirm-actions">
       <button id="deleteMediaCancelButton" class="secondary-action" type="button">キャンセル</button>
-      <button id="deleteMediaConfirmButton" class="danger-action" type="button">完全に削除</button>
+      <button id="deleteMediaConfirmButton" class="danger-action" type="button">ゴミ箱へ移動</button>
     </div>
   </div>
 </dialog>
@@ -1089,6 +1138,8 @@ const state = {
   groupBindingId: appParams.get('groupBinding'),
   pendingGroup: null,
   assets: [],
+  trashAssets: [],
+  trashLoading: false,
   activeAssetId: null,
   deleteInProgress: false,
   mediaOffset: 0,
@@ -1210,6 +1261,7 @@ function applySession(session) {
   $('userMeta').textContent = family ? family.name + ' ・ ' + roleLabel : '家族アルバム';
   $('albumTitle').textContent = family?.name || '家族アルバム';
   $('uploadButton').disabled = !canUpload || !$('fileInput').files?.length;
+  $('trashButton').hidden = !canUpload;
 
   const avatarImage = $('userAvatarImage');
   const avatarFallback = $('userAvatarFallback');
@@ -1447,7 +1499,9 @@ async function logout() {
   state.familyId = null;
   state.canUpload = false;
   state.assets = [];
+  state.trashAssets = [];
   toggleUserMenu(false);
+  closeDialog($('trashDialog'));
   closeUploadDrawer(true);
   $('loginButton').disabled = !window.liff || !state.config?.liffId;
   showLoginUi();
@@ -1742,12 +1796,106 @@ async function downloadOriginal(item) {
   }
 }
 
+function renderTrash(items) {
+  const root = $('trashList');
+  root.innerHTML = '';
+  if (state.trashLoading) {
+    root.innerHTML = '<div class="trash-empty">ゴミ箱を読み込んでいます...</div>';
+    return;
+  }
+  if (!items.length) {
+    root.innerHTML = '<div class="trash-empty">ゴミ箱は空です</div>';
+    return;
+  }
+
+  for (const item of items) {
+    const row = document.createElement('article');
+    row.className = 'trash-item';
+
+    const thumbWrap = document.createElement('div');
+    thumbWrap.className = 'trash-thumb-wrap';
+    const placeholder = document.createElement('span');
+    placeholder.className = 'trash-placeholder';
+    placeholder.textContent = item.type === 'video' ? 'VIDEO' : isRaw(item) ? 'RAW' : 'IMAGE';
+    thumbWrap.appendChild(placeholder);
+    if (item.previewUrl) {
+      const image = document.createElement('img');
+      image.className = 'trash-thumb';
+      image.src = item.previewUrl;
+      image.alt = '';
+      image.loading = 'lazy';
+      image.addEventListener('error', () => image.remove(), { once: true });
+      thumbWrap.appendChild(image);
+    }
+
+    const copy = document.createElement('div');
+    copy.className = 'trash-copy';
+    const name = document.createElement('p');
+    name.className = 'trash-name';
+    name.textContent = item.originalFilename;
+    const meta = document.createElement('p');
+    meta.className = 'trash-meta';
+    const trashedAt = new Date(item.trashedAt);
+    const trashedLabel = Number.isNaN(trashedAt.getTime())
+      ? 'ゴミ箱へ移動済み'
+      : new Intl.DateTimeFormat('ja-JP', { dateStyle: 'medium', timeStyle: 'short' }).format(trashedAt) + 'に移動';
+    meta.textContent = trashedLabel + ' ・ ' + formatBytes(item.sizeBytes);
+    copy.append(name, meta);
+
+    const restore = document.createElement('button');
+    restore.className = 'secondary-action trash-restore';
+    restore.type = 'button';
+    restore.textContent = '復元';
+    restore.addEventListener('click', () => restoreTrashItem(item, restore).catch((error) => status('ERROR: ' + error.message)));
+
+    row.append(thumbWrap, copy, restore);
+    root.appendChild(row);
+  }
+}
+
+async function loadTrash() {
+  if (!state.canUpload || !state.familyId) return;
+  state.trashLoading = true;
+  renderTrash(state.trashAssets);
+  try {
+    const data = await api('/api/families/' + encodeURIComponent(state.familyId) + '/trash');
+    state.trashAssets = data.assets || [];
+  } finally {
+    state.trashLoading = false;
+    renderTrash(state.trashAssets);
+  }
+}
+
+async function openTrashDialog() {
+  if (!state.canUpload) return;
+  toggleUserMenu(false);
+  openDialog($('trashDialog'));
+  await loadTrash();
+}
+
+async function restoreTrashItem(item, button) {
+  if (!state.canUpload) throw new Error('復元権限がありません。');
+  button.disabled = true;
+  button.textContent = '復元中...';
+  try {
+    await api('/api/media/' + encodeURIComponent(item.id) + '/restore', { method: 'POST' });
+    state.trashAssets = state.trashAssets.filter((asset) => asset.id !== item.id);
+    renderTrash(state.trashAssets);
+    await loadMedia(true);
+    status('「' + item.originalFilename + '」を復元しました');
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = '復元';
+    throw error;
+  }
+}
+
 function setDeleteBusy(busy) {
   state.deleteInProgress = busy;
   $('deleteMediaDialog').setAttribute('aria-busy', String(busy));
   $('deleteMediaCancelButton').disabled = busy;
   $('deleteMediaConfirmButton').disabled = busy;
-  $('deleteMediaConfirmButton').textContent = busy ? '削除中...' : '完全に削除';
+  $('deleteMediaConfirmButton').textContent = busy ? '移動中...' : 'ゴミ箱へ移動';
 }
 
 function openDeleteMediaDialog() {
@@ -1775,12 +1923,12 @@ function focusAfterMediaDelete(assetId) {
   });
 }
 
-async function deleteActiveMedia() {
-  if (!state.canUpload) throw new Error('削除権限がありません。');
+async function trashActiveMedia() {
+  if (!state.canUpload) throw new Error('ゴミ箱へ移動する権限がありません。');
   if (state.deleteInProgress) return;
   const itemIndex = state.assets.findIndex((asset) => asset.id === state.activeAssetId);
   const item = state.assets[itemIndex];
-  if (!item) throw new Error('削除する写真・動画が見つかりません。');
+  if (!item) throw new Error('移動する写真・動画が見つかりません。');
   const nextFocusAssetId = state.assets[itemIndex + 1]?.id || state.assets[itemIndex - 1]?.id || null;
 
   setDeleteBusy(true);
@@ -1797,7 +1945,7 @@ async function deleteActiveMedia() {
     closeDeleteMediaDialog();
     closeGallery();
     focusAfterMediaDelete(nextFocusAssetId);
-    status('「' + item.originalFilename + '」を削除しました');
+    status('「' + item.originalFilename + '」をゴミ箱へ移動しました');
   } catch (error) {
     setDeleteBusy(false);
     throw error;
@@ -1906,6 +2054,11 @@ $('userMenuButton').addEventListener('click', (event) => {
 });
 $('userMenuPopover').addEventListener('click', (event) => event.stopPropagation());
 document.addEventListener('click', () => toggleUserMenu(false));
+$('trashButton').addEventListener('click', () => openTrashDialog().catch((e) => status('ERROR: ' + e.message)));
+$('trashCloseButton').addEventListener('click', () => closeDialog($('trashDialog')));
+$('trashDialog').addEventListener('click', (event) => {
+  if (event.target === $('trashDialog')) closeDialog($('trashDialog'));
+});
 $('logoutButton').addEventListener('click', () => logout().catch((e) => status('ERROR: ' + e.message)));
 $('addMediaButton').addEventListener('click', openUploadDrawer);
 $('uploadDrawerCloseButton').addEventListener('click', () => closeUploadDrawer(true));
@@ -1936,7 +2089,7 @@ $('galleryDownloadButton').addEventListener('click', () => {
   if (item) downloadOriginal(item).catch((e) => status('ERROR: ' + e.message));
 });
 $('deleteMediaCancelButton').addEventListener('click', closeDeleteMediaDialog);
-$('deleteMediaConfirmButton').addEventListener('click', () => deleteActiveMedia().catch((e) => status('ERROR: ' + e.message)));
+$('deleteMediaConfirmButton').addEventListener('click', () => trashActiveMedia().catch((e) => status('ERROR: ' + e.message)));
 $('deleteMediaDialog').addEventListener('click', (event) => {
   if (event.target === $('deleteMediaDialog')) closeDeleteMediaDialog();
 });

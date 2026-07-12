@@ -256,7 +256,9 @@ CREATE TABLE media_assets (
   client_last_modified_at TEXT,
   uploaded_at TEXT NOT NULL,
   processing_status TEXT NOT NULL CHECK (processing_status IN ('pending', 'processing', 'ready', 'failed')),
-  visibility TEXT NOT NULL DEFAULT 'family' CHECK (visibility IN ('family', 'owner_only'))
+  visibility TEXT NOT NULL DEFAULT 'family' CHECK (visibility IN ('family', 'owner_only')),
+  trashed_at TEXT,
+  trashed_by_user_id TEXT REFERENCES users(id)
 );
 ```
 
@@ -307,7 +309,7 @@ CREATE TABLE notification_events (
 
 ### 7.8 LINE group bindings
 
-LINEグループは家族アルバムへ紐づけ、グループ由来では `viewer` または `uploader` だけを付与する。`viewer` は閲覧のみ、`uploader` は原本の追加・削除ができる。`owner` / `admin` は既存の `family_members` を権威とし、LINEグループから昇格させない。
+LINEグループは家族アルバムへ紐づけ、グループ由来では `viewer` または `uploader` だけを付与する。`viewer` は閲覧のみ、`uploader` は原本の追加・ゴミ箱移動・復元ができる。`owner` / `admin` は既存の `family_members` を権威とし、LINEグループから昇格させない。
 
 - 招待時: `join` webhookでgroup ID・名称・ハッシュ化した一回限り設定トークンを保存
 - 設定時: 既存familyのowner/adminかつ対象LINEグループの現メンバーであることを検証
@@ -427,7 +429,15 @@ multipart upload を完了し、ハッシュとサイズを確定する。
 
 #### `DELETE /api/media/:assetId`
 
-`owner` / `admin` / `uploader` が、同じ家族アルバムの原本と通知用プレビューを完全削除する。D1では削除ジョブの記録、関連ダウンロードトークン・通知履歴・メディア行の削除を同一batchで確定し、その後R2を削除する。R2削除に失敗したジョブは15分ごとのscheduled handlerで再試行し、`viewer` は拒否する。
+`owner` / `admin` / `uploader` が、同じ家族アルバムのメディアをゴミ箱へ移動する。D1の `trashed_at` / `trashed_by_user_id` だけを更新し、原本とプレビューはNAS/R2に期限なく保持する。通常一覧・原本DL・公開通知プレビューからは即時に除外し、既存ダウンロードトークンも失効させる。自動完全削除・ゴミ箱を空にするAPI・scheduled削除処理は持たない。
+
+#### `GET /api/families/:familyId/trash`
+
+`owner` / `admin` / `uploader` に、ゴミ箱内のメディアと復元用プレビューを返す。`viewer` は拒否する。
+
+#### `POST /api/media/:assetId/restore`
+
+`owner` / `admin` / `uploader` が `trashed_at` / `trashed_by_user_id` をクリアし、保存済み原本・プレビューを再び通常アルバムへ戻す。
 
 ### 8.5 LINE
 
