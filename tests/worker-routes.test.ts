@@ -55,6 +55,11 @@ describe('public Worker routes', () => {
     expect(html).toContain('aria-haspopup="menu"');
     expect(html).toContain('id="addMediaButton"');
     expect(html).toContain('class="fab"');
+    expect(html).toContain('class="fab-icon"');
+    expect(html).toContain('viewBox="0 0 24 24"');
+    expect(html).toContain('x1="12" y1="5" x2="12" y2="19"');
+    expect(html).toContain('x1="5" y1="12" x2="19" y2="12"');
+    expect(html).not.toContain('hidden>＋</button>');
     expect(html).toContain('id="uploadDrawer"');
     expect(html).toContain('class="upload-sheet"');
     expect(html).toContain('aria-modal="true"');

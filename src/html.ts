@@ -759,7 +759,7 @@ export function renderAppHtml(): string {
       display: grid;
       width: 60px;
       height: 60px;
-      padding: 0 0 3px;
+      padding: 0;
       border: 0;
       border-radius: 50%;
       place-items: center;
@@ -767,9 +767,15 @@ export function renderAppHtml(): string {
       background: var(--app-accent);
       box-shadow: 0 14px 30px rgba(22, 131, 74, .34);
       cursor: pointer;
-      font-size: 36px;
-      font-weight: 300;
-      line-height: 1;
+    }
+    .fab-icon {
+      display: block;
+      width: 32px;
+      height: 32px;
+      stroke: currentColor;
+      stroke-width: 2;
+      stroke-linecap: round;
+      pointer-events: none;
     }
     .fab:hover, .fab:focus-visible { background: var(--app-accent-strong); transform: translateY(-2px); }
     .fab:active { transform: translateY(0); }
@@ -925,7 +931,12 @@ export function renderAppHtml(): string {
     <p class="footer-note">写真・動画の原本をそのまま保存しています。</p>
   </main>
 
-  <button id="addMediaButton" class="fab" type="button" aria-label="写真・動画を追加" hidden>＋</button>
+  <button id="addMediaButton" class="fab" type="button" aria-label="写真・動画を追加" hidden>
+    <svg class="fab-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <line x1="12" y1="5" x2="12" y2="19" />
+      <line x1="5" y1="12" x2="19" y2="12" />
+    </svg>
+  </button>
 </div>
 
 <div id="status" class="status-toast" role="status" aria-live="polite" hidden>起動中...</div>
