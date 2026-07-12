@@ -94,7 +94,7 @@ LINEのトークに写真を送らせると、LINE側で圧縮・変換される
 
 採用する経路:
 
-1. LINE公式アカウントのリッチメニューまたはメッセージから LIFF を開く
+1. グループ参加時の案内メッセージまたはアップロード通知から LIFF を開く
 2. LIFF Web UI の `<input type="file" multiple>` で端末内ファイルを選択
 3. ブラウザからアプリのアップロードAPIへ送信
 4. サーバーが R2 に原本保存する
@@ -111,7 +111,7 @@ LINEのトークに写真を送らせると、LINE側で圧縮・変換される
 
 ```text
 LINE Official Account
-  ├─ Rich Menu / Push Message
+  ├─ Group setup / Push Message
   ▼
 LIFF Web App
   ├─ Login / Family selection
@@ -486,7 +486,7 @@ LINE Messaging API webhook。MVPでは主に以下を扱う。
 
 ### 9.2 LINE導線
 
-- リッチメニュー: 「写真追加」「アルバムを見る」「家族を招待」
+- グループ参加時の設定リンク: 連携先アルバムと権限を選択
 - 新規追加通知: 「3件の写真がまるのこしに追加されました」
 - 通知ボタン: LIFF の該当月/該当投稿へ遷移
 
