@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildOriginalKey,
   createSessionCookie,
+  findCompleteJpegLength,
   normalizeMediaMimeType,
   parseCookieHeader,
   parseSingleByteRange,
@@ -43,6 +44,34 @@ describe('core utilities', () => {
     expect(parseSingleByteRange('bytes=20-10', 100)).toEqual({ kind: 'unsatisfiable' });
     expect(parseSingleByteRange('bytes=abc-def', 100)).toEqual({ kind: 'unsatisfiable' });
     expect(parseSingleByteRange('bytes=0-0,2-3', 100)).toEqual({ kind: 'unsatisfiable' });
+  });
+
+  it('finds the real JPEG end through entropy bytes and ignores declared trailing bytes', () => {
+    const jpegWithTrailingBytes = new Uint8Array([
+      0xff, 0xd8,
+      0xff, 0xc0, 0x00, 0x11, 0x08,
+      0x00, 0x01, 0x00, 0x01, 0x03,
+      0x01, 0x11, 0x00, 0x02, 0x11, 0x00, 0x03, 0x11, 0x00,
+      0xff, 0xda, 0x00, 0x0c, 0x03,
+      0x01, 0x00, 0x02, 0x11, 0x03, 0x11,
+      0x00, 0x3f, 0x00,
+      0x11, 0xff, 0x00, 0x22, 0xff, 0xd0, 0x33,
+      0xff, 0xd9,
+      0x76, 0x97,
+    ]);
+
+    const frameOnly = new Uint8Array([
+      0xff, 0xd8,
+      0xff, 0xc0, 0x00, 0x11, 0x08,
+      0x00, 0x01, 0x00, 0x01, 0x03,
+      0x01, 0x11, 0x00, 0x02, 0x11, 0x00, 0x03, 0x11, 0x00,
+      0xff, 0xd9,
+    ]);
+
+    expect(findCompleteJpegLength(jpegWithTrailingBytes)).toBe(jpegWithTrailingBytes.byteLength - 2);
+    expect(findCompleteJpegLength(jpegWithTrailingBytes.subarray(0, -4))).toBeNull();
+    expect(findCompleteJpegLength(frameOnly)).toBeNull();
+    expect(findCompleteJpegLength(new Uint8Array([0xff, 0xd8, 0xff, 0xd9]))).toBeNull();
   });
 
   it('computes SHA-256 as lowercase hex', async () => {

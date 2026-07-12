@@ -9,8 +9,15 @@ interface PreviewDescriptor {
   height: number;
 }
 
+interface PreviewRangeSource {
+  size: number;
+  read(offset: number, length: number): Promise<Uint8Array | null>;
+}
+
 const parser = (core as unknown as {
-  findRawJpegPreview?: (bytes: Uint8Array) => PreviewDescriptor | null;
+  findRawJpegPreview?: (
+    source: Uint8Array | PreviewRangeSource,
+  ) => PreviewDescriptor | null | Promise<PreviewDescriptor | null>;
 }).findRawJpegPreview;
 
 function writeIfd(
@@ -45,13 +52,43 @@ function createJpegHeader(width: number, height: number): Uint8Array {
     0x01, 0x11, 0x00,
     0x02, 0x11, 0x00,
     0x03, 0x11, 0x00,
+    0xff, 0xda, 0x00, 0x0c, 0x03,
+    0x01, 0x00, 0x02, 0x11, 0x03, 0x11,
+    0x00, 0x3f, 0x00,
+    0x11, 0xff, 0x00, 0x22,
     0xff, 0xd9,
   ]);
 }
 
-function createDngHeaderFixture(): Uint8Array {
-  const bytes = new Uint8Array(1_024);
+function createJpegWithComment(width: number, height: number, commentBytes: number): Uint8Array {
+  const base = createJpegHeader(width, height);
+  const payload = new Uint8Array(commentBytes).fill(0x41);
+  const result = new Uint8Array(base.byteLength - 2 + 4 + payload.byteLength + 2);
+  result.set(base.subarray(0, -2), 0);
+  let cursor = base.byteLength - 2;
+  result.set([0xff, 0xfe, ((payload.byteLength + 2) >> 8) & 0xff, (payload.byteLength + 2) & 0xff], cursor);
+  cursor += 4;
+  result.set(payload, cursor);
+  result.set([0xff, 0xd9], cursor + payload.byteLength);
+  return result;
+}
+
+function createJpegWithEntropy(width: number, height: number, entropyBytes: number): Uint8Array {
+  const base = createJpegHeader(width, height);
+  const result = new Uint8Array(base.byteLength + entropyBytes);
+  const endOfScan = base.byteLength - 2;
+  result.set(base.subarray(0, endOfScan));
+  result.fill(0x11, endOfScan, endOfScan + entropyBytes);
+  result.set([0xff, 0xd9], endOfScan + entropyBytes);
+  return result;
+}
+
+function createDngHeaderFixture(galleryTrailingBytes = new Uint8Array()): Uint8Array {
+  const bytes = new Uint8Array(4_096);
   const view = new DataView(bytes.buffer);
+  const smallJpeg = createJpegHeader(160, 120);
+  const fullJpeg = createJpegHeader(9_504, 6_320);
+  const galleryJpeg = createJpegHeader(2_112, 1_408);
   bytes[0] = 0x49;
   bytes[1] = 0x49;
   view.setUint16(2, 42, true);
@@ -75,28 +112,33 @@ function createDngHeaderFixture(): Uint8Array {
     { tag: 279, type: 4, count: 1, value: length },
   ]);
 
-  jpegIfd(200, 160, 120, 2_000, 4);
-  jpegIfd(400, 9_504, 6_320, 2_500, 2_000_000);
-  jpegIfd(600, 2_112, 1_408, 3_000, 6);
+  jpegIfd(200, 160, 120, 2_000, smallJpeg.byteLength);
+  jpegIfd(400, 9_504, 6_320, 2_500, fullJpeg.byteLength);
+  jpegIfd(600, 2_112, 1_408, 3_000, galleryJpeg.byteLength + galleryTrailingBytes.byteLength);
+  bytes.set(smallJpeg, 2_000);
+  bytes.set(fullJpeg, 2_500);
+  bytes.set(galleryJpeg, 3_000);
+  bytes.set(galleryTrailingBytes, 3_000 + galleryJpeg.byteLength);
   return bytes;
 }
 
 function createArwHeaderFixture(): { header: Uint8Array; jpeg: Uint8Array } {
-  const header = new Uint8Array(4_096);
+  const smallJpeg = createJpegHeader(1_616, 1_080);
+  const galleryJpeg = createJpegWithEntropy(1_616, 1_080, 70_000);
+  const header = new Uint8Array(3_500 + galleryJpeg.byteLength);
   const view = new DataView(header.buffer);
-  const galleryJpeg = createJpegHeader(1_616, 1_080);
   header[0] = 0x49;
   header[1] = 0x49;
   view.setUint16(2, 42, true);
   view.setUint32(4, 8, true);
 
-  // Sony ARWはIFD0に幅・高さタグのない旧JPEGサムネイルを持ち、
-  // linked IFD側にフル解像度JPEGプレビューを持つ。
+  // Sony ARWはIFD0に小さい旧JPEGサムネイルを持ち、
+  // linked IFD側に同じ表示解像度でも高品質なJPEGプレビューを持つことがある。
   writeIfd(view, 8, [
     { tag: 254, type: 4, count: 1, value: 1 },
     { tag: 259, type: 3, count: 1, value: 6 },
     { tag: 513, type: 4, count: 1, value: 3_000 },
-    { tag: 514, type: 4, count: 1, value: galleryJpeg.byteLength },
+    { tag: 514, type: 4, count: 1, value: smallJpeg.byteLength },
   ], 200);
   writeIfd(view, 200, [
     { tag: 254, type: 4, count: 1, value: 1 },
@@ -104,16 +146,87 @@ function createArwHeaderFixture(): { header: Uint8Array; jpeg: Uint8Array } {
   ], 400);
   writeIfd(view, 400, [
     { tag: 254, type: 4, count: 1, value: 1 },
-    { tag: 256, type: 4, count: 1, value: 7_008 },
-    { tag: 257, type: 4, count: 1, value: 4_672 },
+    { tag: 256, type: 4, count: 1, value: 1_616 },
+    { tag: 257, type: 4, count: 1, value: 1_080 },
     { tag: 259, type: 3, count: 1, value: 7 },
     { tag: 262, type: 3, count: 1, value: 6 },
     { tag: 277, type: 3, count: 1, value: 3 },
     { tag: 513, type: 4, count: 1, value: 3_500 },
-    { tag: 514, type: 4, count: 1, value: 2_245_043 },
+    { tag: 514, type: 4, count: 1, value: galleryJpeg.byteLength },
   ]);
-  header.set(galleryJpeg, 3_000);
+  header.set(smallJpeg, 3_000);
+  header.set(galleryJpeg, 3_500);
   return { header, jpeg: galleryJpeg };
+}
+
+function createLateIfdArwFixture(): { file: Uint8Array; jpeg: Uint8Array; firstIfdOffset: number } {
+  const firstIfdOffset = 1_200_000;
+  const jpegOffset = 1_250_000;
+  const jpeg = createJpegHeader(1_616, 1_080);
+  const file = new Uint8Array(jpegOffset + jpeg.byteLength);
+  const view = new DataView(file.buffer);
+  file[0] = 0x49;
+  file[1] = 0x49;
+  view.setUint16(2, 42, true);
+  view.setUint32(4, firstIfdOffset, true);
+  writeIfd(view, firstIfdOffset, [
+    { tag: 259, type: 3, count: 1, value: 6 },
+    { tag: 513, type: 4, count: 1, value: jpegOffset },
+    { tag: 514, type: 4, count: 1, value: jpeg.byteLength },
+  ]);
+  file.set(jpeg, jpegOffset);
+  return { file, jpeg, firstIfdOffset };
+}
+
+function createOverBudgetTiffFixture(): Uint8Array {
+  const jpeg = createJpegHeader(1_616, 1_080);
+  const bytes = new Uint8Array(4_096);
+  const view = new DataView(bytes.buffer);
+  bytes[0] = 0x49;
+  bytes[1] = 0x49;
+  view.setUint16(2, 42, true);
+  view.setUint32(4, 8, true);
+  const entries = [
+    { tag: 256, type: 4, count: 1, value: 1_616 },
+    { tag: 257, type: 4, count: 1, value: 1_080 },
+    { tag: 259, type: 3, count: 1, value: 7 },
+    { tag: 262, type: 3, count: 1, value: 6 },
+    { tag: 273, type: 4, count: 1, value: 3_500 },
+    { tag: 277, type: 3, count: 1, value: 3 },
+    { tag: 279, type: 4, count: 1, value: jpeg.byteLength },
+    ...Array.from({ length: 250 }, (_, index) => ({
+      tag: 40_000 + index,
+      type: 4,
+      count: 1,
+      value: index,
+    })),
+  ];
+  writeIfd(view, 8, entries);
+  bytes.set(jpeg, 3_500);
+  return bytes;
+}
+
+function createRangeReadBudgetFixture(): Uint8Array {
+  const bytes = new Uint8Array(8_192);
+  const view = new DataView(bytes.buffer);
+  const tags = [256, 257, 259, 262, 273, 277, 279, 324, 325, 513, 514];
+  bytes[0] = 0x49;
+  bytes[1] = 0x49;
+  view.setUint16(2, 42, true);
+  view.setUint32(4, 8, true);
+
+  for (let directoryIndex = 0; directoryIndex < 16; directoryIndex += 1) {
+    const directoryOffset = 8 + directoryIndex * 160;
+    const nextOffset = directoryIndex < 15 ? directoryOffset + 160 : 0;
+    const entries = tags.map((tag, tagIndex) => {
+      const valueOffset = 4_000 + (directoryIndex * tags.length + tagIndex) * 8;
+      view.setUint32(valueOffset, 0, true);
+      view.setUint32(valueOffset + 4, 0, true);
+      return { tag, type: 4, count: 2, value: valueOffset };
+    });
+    writeIfd(view, directoryOffset, entries, nextOffset);
+  }
+  return bytes;
 }
 
 function fakeR2Object(bytes: Uint8Array, range?: R2Range): R2ObjectBody {
@@ -147,6 +260,7 @@ function fakeGalleryEnv(
   rangeCalls: Array<{ offset?: number; length?: number }>,
   listRows: Array<Record<string, unknown>> = [],
   assetOverrides: Record<string, unknown> = {},
+  sourceBytes?: Uint8Array,
 ): Env {
   const db = {
     prepare(sql: string) {
@@ -193,6 +307,12 @@ function fakeGalleryEnv(
     async get(_key: string, options?: R2GetOptions) {
       const range = options?.range as { offset?: number; length?: number } | undefined;
       rangeCalls.push({ offset: range?.offset, length: range?.length });
+      if (sourceBytes) {
+        const offset = range?.offset ?? 0;
+        const length = range?.length ?? Math.max(0, sourceBytes.byteLength - offset);
+        if (offset < 0 || length < 0 || offset + length > sourceBytes.byteLength) return null;
+        return fakeR2Object(sourceBytes.slice(offset, offset + length), range as R2Range | undefined);
+      }
       if (range?.offset === 3_000) return fakeR2Object(jpeg, range as R2Range);
       if (range?.offset === 0 && typeof range.length === 'number' && range.length <= jpeg.byteLength) {
         return fakeR2Object(jpeg.slice(0, range.length), range as R2Range);
@@ -217,25 +337,46 @@ function fakeGalleryEnv(
 }
 
 describe('gallery and RAW previews', () => {
-  it('selects a gallery-sized embedded JPEG instead of the full-resolution DNG preview', () => {
+  it('selects a gallery-sized embedded JPEG instead of the full-resolution DNG preview', async () => {
     expect(parser).toBeTypeOf('function');
-    expect(parser?.(createDngHeaderFixture())).toEqual({
+    expect(await parser?.(createDngHeaderFixture())).toEqual({
       offset: 3_000,
-      length: 6,
+      length: createJpegHeader(2_112, 1_408).byteLength,
       width: 2_112,
       height: 1_408,
     });
   });
 
-  it('selects the gallery-sized old-JPEG thumbnail embedded in Sony ARW', () => {
+  it('selects the gallery-sized old-JPEG thumbnail embedded in Sony ARW', async () => {
     const { header, jpeg } = createArwHeaderFixture();
     expect(parser).toBeTypeOf('function');
-    expect(parser?.(header)).toEqual({
-      offset: 3_000,
+    expect(await parser?.(header)).toEqual({
+      offset: 3_500,
       length: jpeg.byteLength,
       width: 1_616,
       height: 1_080,
     });
+  });
+
+  it('rejects TIFF directories that exceed the global parser budget', async () => {
+    expect(parser).toBeTypeOf('function');
+    expect(await parser?.(createOverBudgetTiffFixture())).toBeNull();
+  });
+
+  it('caps range reads for TIFF values across the whole parse', async () => {
+    expect(parser).toBeTypeOf('function');
+    const bytes = createRangeReadBudgetFixture();
+    let readCalls = 0;
+    const source: PreviewRangeSource = {
+      size: bytes.byteLength,
+      async read(offset, length) {
+        readCalls += 1;
+        return bytes.slice(offset, offset + length);
+      },
+    };
+
+    expect(await parser?.(source)).toBeNull();
+    expect(readCalls).toBeLessThanOrEqual(32);
   });
 
   it('requires authentication for media previews and original content', async () => {
@@ -261,23 +402,27 @@ describe('gallery and RAW previews', () => {
   });
 
   it('serves the embedded DNG JPEG through the authenticated preview endpoint', async () => {
-    const jpeg = new Uint8Array([0xff, 0xd8, 0x01, 0x02, 0xff, 0xd9]);
+    const trailingBytes = new Uint8Array([0x76, 0x97]);
+    const file = createDngHeaderFixture(trailingBytes);
+    const jpeg = createJpegHeader(2_112, 1_408);
     const rangeCalls: Array<{ offset?: number; length?: number }> = [];
     const res = await worker.fetch(
       new Request('https://mrnks.2-38.com/api/media/ast_1/preview', {
         headers: { cookie: 'mrnks_session=test-token' },
       }),
-      fakeGalleryEnv(createDngHeaderFixture(), jpeg, rangeCalls),
+      fakeGalleryEnv(new Uint8Array(), new Uint8Array(), rangeCalls, [], {
+        original_size_bytes: file.byteLength,
+      }, file),
     );
 
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toBe('image/jpeg');
     expect(res.headers.get('x-mrnks-preview-source')).toBe('embedded-dng');
+    expect(res.headers.get('content-length')).toBe(String(jpeg.byteLength));
     expect(new Uint8Array(await res.arrayBuffer())).toEqual(jpeg);
-    expect(rangeCalls).toEqual([
-      { offset: 0, length: 1_048_576 },
-      { offset: 3_000, length: 6 },
-    ]);
+    expect(rangeCalls).toContainEqual({ offset: 3_000, length: jpeg.byteLength + trailingBytes.byteLength });
+    expect(rangeCalls.every((range) => (range.length ?? 0) <= 65_536)).toBe(true);
+    expect(rangeCalls.length).toBeLessThanOrEqual(33);
   });
 
   it('serves the embedded Sony ARW JPEG through the authenticated preview endpoint', async () => {
@@ -290,19 +435,64 @@ describe('gallery and RAW previews', () => {
       fakeGalleryEnv(header, jpeg, rangeCalls, [], {
         original_filename: '_DSC9863.arw',
         original_mime_type: 'image/x-sony-arw',
-        original_size_bytes: 68_538_368,
+        original_size_bytes: header.byteLength,
         original_storage_key: 'originals/fam_1/ast_1/DSC9863.arw',
-      }),
+      }, header),
     );
 
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toBe('image/jpeg');
     expect(res.headers.get('x-mrnks-preview-source')).toBe('embedded-arw');
     expect(new Uint8Array(await res.arrayBuffer())).toEqual(jpeg);
-    expect(rangeCalls).toEqual([
-      { offset: 0, length: 1_048_576 },
-      { offset: 3_000, length: jpeg.byteLength },
-    ]);
+    const finalPreviewRead = { offset: 3_500, length: jpeg.byteLength };
+    expect(jpeg.byteLength).toBeGreaterThan(65_536);
+    expect(rangeCalls).toContainEqual(finalPreviewRead);
+    expect(rangeCalls
+      .filter((range) => range.offset !== finalPreviewRead.offset || range.length !== finalPreviewRead.length)
+      .every((range) => (range.length ?? 0) <= 65_536)).toBe(true);
+    expect(rangeCalls.length).toBeLessThanOrEqual(33);
+  });
+
+  it('finds Sony ARW IFDs located beyond the first 1 MiB without reading the full RAW', async () => {
+    const { file, jpeg, firstIfdOffset } = createLateIfdArwFixture();
+    const rangeCalls: Array<{ offset?: number; length?: number }> = [];
+    const res = await worker.fetch(
+      new Request('https://mrnks.2-38.com/api/media/ast_1/preview', {
+        headers: { cookie: 'mrnks_session=test-token' },
+      }),
+      fakeGalleryEnv(new Uint8Array(), new Uint8Array(), rangeCalls, [], {
+        original_filename: 'late-ifd.arw',
+        original_mime_type: 'image/x-sony-arw',
+        original_size_bytes: file.byteLength,
+        original_storage_key: 'originals/fam_1/ast_1/late-ifd.arw',
+      }, file),
+    );
+
+    expect(res.status).toBe(200);
+    expect(new Uint8Array(await res.arrayBuffer())).toEqual(jpeg);
+    expect(rangeCalls).toContainEqual({ offset: firstIfdOffset, length: 2 });
+    expect(rangeCalls.every((range) => (range.length ?? 0) <= 65_536)).toBe(true);
+    expect(rangeCalls.length).toBeLessThanOrEqual(33);
+  });
+
+  it('rejects an embedded RAW JPEG whose declared range has no EOI marker', async () => {
+    const { header, jpeg } = createArwHeaderFixture();
+    const corrupted = header.slice();
+    corrupted[3_500 + jpeg.byteLength - 2] = 0;
+    corrupted[3_500 + jpeg.byteLength - 1] = 0;
+    const res = await worker.fetch(
+      new Request('https://mrnks.2-38.com/api/media/ast_1/preview', {
+        headers: { cookie: 'mrnks_session=test-token' },
+      }),
+      fakeGalleryEnv(new Uint8Array(), new Uint8Array(), [], [], {
+        original_filename: 'corrupted.arw',
+        original_mime_type: 'image/x-sony-arw',
+        original_size_bytes: corrupted.byteLength,
+        original_storage_key: 'originals/fam_1/ast_1/corrupted.arw',
+      }, corrupted),
+    );
+
+    expect(res.status).toBe(415);
   });
 
   it('paginates media lists without hiding the total album size', async () => {

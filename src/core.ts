@@ -190,104 +190,239 @@ export interface EmbeddedJpegPreview {
   height: number;
 }
 
-export function findRawJpegPreview(bytes: Uint8Array): EmbeddedJpegPreview | null {
-  if (bytes.byteLength < 8) return null;
-  const littleEndian = bytes[0] === 0x49 && bytes[1] === 0x49;
-  const bigEndian = bytes[0] === 0x4d && bytes[1] === 0x4d;
+export interface RawPreviewRangeSource {
+  size: number;
+  read(offset: number, length: number): Promise<Uint8Array | null>;
+}
+
+const MAX_TIFF_DIRECTORIES = 16;
+const MAX_TIFF_PENDING_DIRECTORIES = 64;
+const MAX_TIFF_ENTRIES_PER_DIRECTORY = 256;
+const MAX_TIFF_ENTRIES_TOTAL = 1_024;
+const MAX_TIFF_SUB_IFDS = 16;
+const MAX_RAW_RANGE_READS = 32;
+const MAX_RAW_RANGE_BYTES = 512 * 1024;
+const MAX_RAW_PREVIEW_DIMENSION = 65_535;
+const MAX_EMBEDDED_JPEG_BYTES = 10 * 1024 * 1024;
+const JPEG_HEADER_READ_BYTES = 64 * 1024;
+const RAW_PREVIEW_TAGS = new Set([256, 257, 259, 262, 273, 277, 279, 324, 325, 330, 513, 514]);
+
+function rawPreviewSource(input: Uint8Array | RawPreviewRangeSource): RawPreviewRangeSource {
+  if (!(input instanceof Uint8Array)) return input;
+  return {
+    size: input.byteLength,
+    async read(offset: number, length: number): Promise<Uint8Array | null> {
+      if (offset < 0 || length < 0 || offset + length > input.byteLength) return null;
+      return input.slice(offset, offset + length);
+    },
+  };
+}
+
+function readTiffUint16(bytes: Uint8Array, offset: number, littleEndian: boolean): number | null {
+  if (offset < 0 || offset + 2 > bytes.byteLength) return null;
+  return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint16(offset, littleEndian);
+}
+
+function readTiffUint32(bytes: Uint8Array, offset: number, littleEndian: boolean): number | null {
+  if (offset < 0 || offset + 4 > bytes.byteLength) return null;
+  return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(offset, littleEndian);
+}
+
+function isJpegStartOfFrame(marker: number): boolean {
+  return marker >= 0xc0 && marker <= 0xcf
+    && marker !== 0xc4
+    && marker !== 0xc8
+    && marker !== 0xcc;
+}
+
+function readJpegDimensions(bytes: Uint8Array): { width: number; height: number } | null {
+  const end = bytes.byteLength;
+  if (end < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) return null;
+  let cursor = 2;
+  while (cursor + 4 <= end) {
+    if (bytes[cursor] !== 0xff) {
+      cursor += 1;
+      continue;
+    }
+    while (cursor < end && bytes[cursor] === 0xff) cursor += 1;
+    if (cursor >= end) break;
+    const marker = bytes[cursor];
+    cursor += 1;
+    if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue;
+    if (marker === 0xd9 || marker === 0xda || cursor + 2 > end) break;
+    const segmentLength = (bytes[cursor] << 8) | bytes[cursor + 1];
+    if (segmentLength < 2 || cursor + segmentLength > end) break;
+    if (isJpegStartOfFrame(marker) && segmentLength >= 7) {
+      const height = (bytes[cursor + 3] << 8) | bytes[cursor + 4];
+      const width = (bytes[cursor + 5] << 8) | bytes[cursor + 6];
+      if (width > 0 && height > 0) return { width, height };
+    }
+    cursor += segmentLength;
+  }
+  return null;
+}
+
+export function findCompleteJpegLength(bytes: Uint8Array): number | null {
+  if (bytes.byteLength < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) return null;
+  let cursor = 2;
+  let sawFrame = false;
+  let sawScan = false;
+
+  while (cursor < bytes.byteLength) {
+    if (bytes[cursor] !== 0xff) return null;
+    while (cursor < bytes.byteLength && bytes[cursor] === 0xff) cursor += 1;
+    if (cursor >= bytes.byteLength) return null;
+    const marker = bytes[cursor];
+    cursor += 1;
+
+    if (marker === 0xd9) return sawFrame && sawScan ? cursor : null;
+    if (marker === 0x00) return null;
+    if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue;
+    if (cursor + 2 > bytes.byteLength) return null;
+    const segmentLength = (bytes[cursor] << 8) | bytes[cursor + 1];
+    if (segmentLength < 2 || cursor + segmentLength > bytes.byteLength) return null;
+    if (isJpegStartOfFrame(marker) && segmentLength >= 7) sawFrame = true;
+    cursor += segmentLength;
+
+    if (marker !== 0xda) continue;
+    sawScan = true;
+    while (cursor < bytes.byteLength) {
+      if (bytes[cursor] !== 0xff) {
+        cursor += 1;
+        continue;
+      }
+      const markerStart = cursor;
+      while (cursor < bytes.byteLength && bytes[cursor] === 0xff) cursor += 1;
+      if (cursor >= bytes.byteLength) return null;
+      const scanMarker = bytes[cursor];
+      cursor += 1;
+      if (scanMarker === 0x00 || scanMarker === 0x01 || (scanMarker >= 0xd0 && scanMarker <= 0xd7)) continue;
+      if (scanMarker === 0xd9) return sawFrame && sawScan ? cursor : null;
+      cursor = markerStart;
+      break;
+    }
+  }
+  return null;
+}
+
+export async function findRawJpegPreview(
+  input: Uint8Array | RawPreviewRangeSource,
+): Promise<EmbeddedJpegPreview | null> {
+  const source = rawPreviewSource(input);
+  if (!Number.isSafeInteger(source.size) || source.size < 8) return null;
+  let rangeReads = 0;
+  let rangeBytes = 0;
+  let readBudgetExhausted = false;
+  const readExact = async (offset: number, length: number): Promise<Uint8Array | null> => {
+    if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(length) || offset < 0 || length < 0) return null;
+    const end = offset + length;
+    if (!Number.isSafeInteger(end) || end > source.size) return null;
+    if (rangeReads >= MAX_RAW_RANGE_READS || rangeBytes + length > MAX_RAW_RANGE_BYTES) {
+      readBudgetExhausted = true;
+      return null;
+    }
+    rangeReads += 1;
+    rangeBytes += length;
+    const bytes = await source.read(offset, length);
+    return bytes?.byteLength === length ? bytes : null;
+  };
+
+  const header = await readExact(0, 8);
+  if (!header) return null;
+  const littleEndian = header[0] === 0x49 && header[1] === 0x49;
+  const bigEndian = header[0] === 0x4d && header[1] === 0x4d;
   if (!littleEndian && !bigEndian) return null;
+  if (readTiffUint16(header, 2, littleEndian) !== 42) return null;
 
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  const readUint16 = (offset: number): number | null => {
-    if (offset < 0 || offset + 2 > view.byteLength) return null;
-    return view.getUint16(offset, littleEndian);
-  };
-  const readUint32 = (offset: number): number | null => {
-    if (offset < 0 || offset + 4 > view.byteLength) return null;
-    return view.getUint32(offset, littleEndian);
-  };
-  if (readUint16(2) !== 42) return null;
-
-  const readValues = (entryOffset: number, type: number, count: number): number[] | null => {
+  let totalEntries = 0;
+  const readValues = async (
+    table: Uint8Array,
+    entryOffset: number,
+    type: number,
+    count: number,
+    maxValues: number,
+  ): Promise<number[] | null> => {
     const valueSize = type === 3 ? 2 : type === 4 || type === 13 ? 4 : 0;
-    if (!valueSize || count < 1 || count > 4_096) return null;
+    if (!valueSize || count < 1 || maxValues < 1) return null;
+    const valueCount = Math.min(count, maxValues);
     const totalBytes = valueSize * count;
-    const dataOffset = totalBytes <= 4 ? entryOffset + 8 : readUint32(entryOffset + 8);
-    if (dataOffset === null || dataOffset < 0 || dataOffset + totalBytes > view.byteLength) return null;
+    if (!Number.isSafeInteger(totalBytes)) return null;
+
+    let valueBytes: Uint8Array;
+    let valueOffset: number;
+    if (totalBytes <= 4) {
+      valueBytes = table;
+      valueOffset = entryOffset + 8;
+    } else {
+      const dataOffset = readTiffUint32(table, entryOffset + 8, littleEndian);
+      if (dataOffset === null) return null;
+      const externalBytes = await readExact(dataOffset, valueCount * valueSize);
+      if (!externalBytes) return null;
+      valueBytes = externalBytes;
+      valueOffset = 0;
+    }
+
     const values: number[] = [];
-    for (let index = 0; index < count; index += 1) {
-      const valueOffset = dataOffset + index * valueSize;
-      const value = valueSize === 2 ? readUint16(valueOffset) : readUint32(valueOffset);
+    for (let index = 0; index < valueCount; index += 1) {
+      const offset = valueOffset + index * valueSize;
+      const value = valueSize === 2
+        ? readTiffUint16(valueBytes, offset, littleEndian)
+        : readTiffUint32(valueBytes, offset, littleEndian);
       if (value === null) return null;
       values.push(value);
     }
     return values;
   };
 
-  const readIfd = (offset: number): { tags: Map<number, number[]>; nextOffset: number } | null => {
-    const entryCount = readUint16(offset);
-    if (entryCount === null || entryCount > 4_096) return null;
-    const entriesEnd = offset + 2 + entryCount * 12;
-    if (entriesEnd + 4 > view.byteLength) return null;
+  const readIfd = async (offset: number): Promise<{ tags: Map<number, number[]>; nextOffset: number } | null> => {
+    const countBytes = await readExact(offset, 2);
+    if (!countBytes) return null;
+    const entryCount = readTiffUint16(countBytes, 0, littleEndian);
+    if (entryCount === null || entryCount > MAX_TIFF_ENTRIES_PER_DIRECTORY) return null;
+    if (totalEntries + entryCount > MAX_TIFF_ENTRIES_TOTAL) return null;
+
+    const tableLength = 2 + entryCount * 12 + 4;
+    const table = await readExact(offset, tableLength);
+    if (!table) return null;
+    totalEntries += entryCount;
+
     const tags = new Map<number, number[]>();
     for (let index = 0; index < entryCount; index += 1) {
-      const entryOffset = offset + 2 + index * 12;
-      const tag = readUint16(entryOffset);
-      const type = readUint16(entryOffset + 2);
-      const count = readUint32(entryOffset + 4);
-      if (tag === null || type === null || count === null) continue;
-      const values = readValues(entryOffset, type, count);
+      const entryOffset = 2 + index * 12;
+      const tag = readTiffUint16(table, entryOffset, littleEndian);
+      const type = readTiffUint16(table, entryOffset + 2, littleEndian);
+      const count = readTiffUint32(table, entryOffset + 4, littleEndian);
+      if (tag === null || type === null || count === null || !RAW_PREVIEW_TAGS.has(tag)) continue;
+      const values = await readValues(table, entryOffset, type, count, tag === 330 ? MAX_TIFF_SUB_IFDS : 1);
       if (values) tags.set(tag, values);
     }
-    return { tags, nextOffset: readUint32(entriesEnd) ?? 0 };
+    return { tags, nextOffset: readTiffUint32(table, 2 + entryCount * 12, littleEndian) ?? 0 };
   };
 
-  const readJpegDimensions = (offset: number, length: number): { width: number; height: number } | null => {
-    const end = Math.min(view.byteLength, offset + length);
-    if (offset < 0 || offset + 4 > end || bytes[offset] !== 0xff || bytes[offset + 1] !== 0xd8) return null;
-    let cursor = offset + 2;
-    while (cursor + 4 <= end) {
-      if (bytes[cursor] !== 0xff) {
-        cursor += 1;
-        continue;
-      }
-      while (cursor < end && bytes[cursor] === 0xff) cursor += 1;
-      if (cursor >= end) break;
-      const marker = bytes[cursor];
-      cursor += 1;
-      if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue;
-      if (marker === 0xd9 || marker === 0xda || cursor + 2 > end) break;
-      const segmentLength = (bytes[cursor] << 8) | bytes[cursor + 1];
-      if (segmentLength < 2 || cursor + segmentLength > end) break;
-      const isStartOfFrame = marker >= 0xc0 && marker <= 0xcf
-        && marker !== 0xc4
-        && marker !== 0xc8
-        && marker !== 0xcc;
-      if (isStartOfFrame && segmentLength >= 7) {
-        const height = (bytes[cursor + 3] << 8) | bytes[cursor + 4];
-        const width = (bytes[cursor + 5] << 8) | bytes[cursor + 6];
-        if (width > 0 && height > 0) return { width, height };
-      }
-      cursor += segmentLength;
-    }
-    return null;
-  };
-
-  const firstIfdOffset = readUint32(4);
+  const firstIfdOffset = readTiffUint32(header, 4, littleEndian);
   if (firstIfdOffset === null) return null;
   const directories: Array<Map<number, number[]>> = [];
   const pendingOffsets = [firstIfdOffset];
   const seenOffsets = new Set<number>();
-  while (pendingOffsets.length > 0 && directories.length < 64) {
+  const enqueue = (offset: number): void => {
+    if (
+      offset > 0
+      && offset < source.size
+      && !seenOffsets.has(offset)
+      && !pendingOffsets.includes(offset)
+      && pendingOffsets.length < MAX_TIFF_PENDING_DIRECTORIES
+    ) pendingOffsets.push(offset);
+  };
+
+  while (pendingOffsets.length > 0 && directories.length < MAX_TIFF_DIRECTORIES && !readBudgetExhausted) {
     const offset = pendingOffsets.shift();
-    if (offset === undefined || offset <= 0 || seenOffsets.has(offset)) continue;
+    if (offset === undefined || offset <= 0 || offset >= source.size || seenOffsets.has(offset)) continue;
     seenOffsets.add(offset);
-    const directory = readIfd(offset);
+    const directory = await readIfd(offset);
     if (!directory) continue;
     directories.push(directory.tags);
-    if (directory.nextOffset > 0) pendingOffsets.push(directory.nextOffset);
-    for (const subIfdOffset of (directory.tags.get(330) || []).slice(0, 32)) {
-      if (subIfdOffset > 0) pendingOffsets.push(subIfdOffset);
-    }
+    enqueue(directory.nextOffset);
+    for (const subIfdOffset of directory.tags.get(330) || []) enqueue(subIfdOffset);
   }
 
   const candidates: EmbeddedJpegPreview[] = [];
@@ -305,25 +440,45 @@ export function findRawJpegPreview(bytes: Uint8Array): EmbeddedJpegPreview | nul
     const jpegLength = interchangeLength
       ?? (rgbJpeg ? directory.get(279)?.[0] ?? directory.get(325)?.[0] : undefined);
     if (jpegOffset === undefined || !Number.isSafeInteger(jpegOffset) || jpegOffset < 0) continue;
-    if (jpegLength === undefined || !Number.isSafeInteger(jpegLength) || jpegLength <= 0 || jpegLength > 10 * 1024 * 1024) continue;
+    if (
+      jpegLength === undefined
+      || !Number.isSafeInteger(jpegLength)
+      || jpegLength <= 0
+      || jpegLength > MAX_EMBEDDED_JPEG_BYTES
+      || jpegOffset + jpegLength > source.size
+    ) continue;
 
-    const jpegDimensions = readJpegDimensions(jpegOffset, jpegLength);
-    const width = directory.get(256)?.[0] ?? jpegDimensions?.width;
-    const height = directory.get(257)?.[0] ?? jpegDimensions?.height;
-    if (!width || !height) continue;
+    const taggedWidth = directory.get(256)?.[0];
+    const taggedHeight = directory.get(257)?.[0];
+    const jpegHeader = await readExact(jpegOffset, Math.min(jpegLength, JPEG_HEADER_READ_BYTES));
+    const jpegDimensions = jpegHeader ? readJpegDimensions(jpegHeader) : null;
+    const width = jpegDimensions?.width ?? taggedWidth;
+    const height = jpegDimensions?.height ?? taggedHeight;
+    if (
+      !width
+      || !height
+      || !Number.isSafeInteger(width)
+      || !Number.isSafeInteger(height)
+      || width > MAX_RAW_PREVIEW_DIMENSION
+      || height > MAX_RAW_PREVIEW_DIMENSION
+    ) continue;
     candidates.push({ offset: jpegOffset, length: jpegLength, width, height });
   }
   if (candidates.length === 0) return null;
 
   const gallerySized = candidates
     .filter((candidate) => Math.max(candidate.width, candidate.height) >= 1_600)
-    .sort((a, b) => (a.width * a.height) - (b.width * b.height));
+    .sort((a, b) => ((a.width * a.height) - (b.width * b.height)) || (b.length - a.length));
   if (gallerySized.length > 0) return gallerySized[0];
-  return candidates.sort((a, b) => (b.width * b.height) - (a.width * a.height))[0];
+  return candidates.sort(
+    (a, b) => ((b.width * b.height) - (a.width * a.height)) || (b.length - a.length),
+  )[0];
 }
 
-export function findDngJpegPreview(bytes: Uint8Array): EmbeddedJpegPreview | null {
-  return findRawJpegPreview(bytes);
+export async function findDngJpegPreview(
+  input: Uint8Array | RawPreviewRangeSource,
+): Promise<EmbeddedJpegPreview | null> {
+  return findRawJpegPreview(input);
 }
 
 function encodePathSegment(value: string): string {

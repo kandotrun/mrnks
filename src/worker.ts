@@ -4,6 +4,7 @@ import {
   clearSessionCookie,
   contentDispositionAttachment,
   createSessionCookie,
+  findCompleteJpegLength,
   findRawJpegPreview,
   getOrigin,
   htmlResponse,
@@ -89,7 +90,6 @@ const SESSION_TTL_SECONDS = 60 * 60 * 24 * 30;
 const GROUP_SESSION_TTL_SECONDS = 60 * 60;
 const DOWNLOAD_TTL_SECONDS = 60 * 10;
 const LINE_PREVIEW_MAX_BYTES = 1_000_000;
-const RAW_HEADER_READ_BYTES = 1024 * 1024;
 const MEDIA_PAGE_SIZE = 60;
 const MAX_MEDIA_OFFSET = 1_000_000;
 const BROWSER_IMAGE_MIME_TYPES = new Set([
@@ -291,7 +291,7 @@ async function handleUploadMedia(
   }
 
   if (!notificationPreviewBytes) {
-    const rawPreview = extractLinePreviewFromRaw(bytes, rawFilename, mimeType);
+    const rawPreview = await extractLinePreviewFromRaw(bytes, rawFilename, mimeType);
     if (rawPreview) {
       notificationPreviewBytes = rawPreview;
       notificationPreviewMimeType = 'image/jpeg';
@@ -423,12 +423,19 @@ function rawPreviewFormat(filename: string, mimeType: string): RawPreviewFormat 
   return null;
 }
 
-function extractLinePreviewFromRaw(bytes: Uint8Array, filename: string, mimeType: string): Uint8Array | null {
+async function extractLinePreviewFromRaw(
+  bytes: Uint8Array,
+  filename: string,
+  mimeType: string,
+): Promise<Uint8Array | null> {
   if (!rawPreviewFormat(filename, mimeType)) return null;
-  const descriptor = findRawJpegPreview(bytes);
+  const descriptor = await findRawJpegPreview(bytes);
   if (!descriptor || descriptor.length > LINE_PREVIEW_MAX_BYTES) return null;
   if (descriptor.offset < 0 || descriptor.offset + descriptor.length > bytes.byteLength) return null;
-  const preview = bytes.slice(descriptor.offset, descriptor.offset + descriptor.length);
+  const declaredPreview = bytes.slice(descriptor.offset, descriptor.offset + descriptor.length);
+  const completeLength = findCompleteJpegLength(declaredPreview);
+  if (!completeLength) return null;
+  const preview = declaredPreview.slice(0, completeLength);
   try {
     assertLineNotificationPreview(preview, 'image/jpeg');
     return preview;
@@ -605,11 +612,17 @@ async function handleMediaPreview(request: Request, env: Env, assetId: string): 
   const rawFormat = rawPreviewFormat(asset.original_filename, asset.original_mime_type);
 
   if (rawFormat) {
-    const headerObject = await env.MEDIA_BUCKET.get(asset.original_storage_key, {
-      range: { offset: 0, length: Math.min(RAW_HEADER_READ_BYTES, asset.original_size_bytes) },
+    const descriptor = await findRawJpegPreview({
+      size: asset.original_size_bytes,
+      async read(offset: number, length: number): Promise<Uint8Array | null> {
+        const object = await env.MEDIA_BUCKET.get(asset.original_storage_key, {
+          range: { offset, length },
+        });
+        if (!object) return null;
+        const bytes = await object.bytes();
+        return bytes.byteLength === length ? bytes : null;
+      },
     });
-    if (!headerObject) throw new HttpError(404, 'original_object_not_found');
-    const descriptor = findRawJpegPreview(await headerObject.bytes());
     if (!descriptor || descriptor.offset + descriptor.length > asset.original_size_bytes) {
       throw new HttpError(415, 'raw_preview_unavailable');
     }
@@ -619,16 +632,17 @@ async function handleMediaPreview(request: Request, env: Env, assetId: string): 
     });
     if (!previewObject) throw new HttpError(404, 'original_object_not_found');
     const previewBytes = await previewObject.bytes();
-    if (previewBytes.byteLength < 2 || previewBytes[0] !== 0xff || previewBytes[1] !== 0xd8) {
+    const completeLength = findCompleteJpegLength(previewBytes);
+    if (previewBytes.byteLength !== descriptor.length || !completeLength) {
       throw new HttpError(415, 'raw_preview_invalid');
     }
 
-    const responseBytes = new Uint8Array(previewBytes.byteLength);
-    responseBytes.set(previewBytes);
+    const responseBytes = new Uint8Array(completeLength);
+    responseBytes.set(previewBytes.subarray(0, completeLength));
     return new Response(responseBytes.buffer, {
       headers: {
         'content-type': 'image/jpeg',
-        'content-length': String(previewBytes.byteLength),
+        'content-length': String(completeLength),
         'cache-control': 'private, max-age=86400',
         'vary': 'Cookie',
         'x-content-type-options': 'nosniff',
