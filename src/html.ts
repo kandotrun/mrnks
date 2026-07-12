@@ -1119,6 +1119,19 @@ async function api(path, options = {}) {
   return data;
 }
 
+async function gatewayApi(path, options = {}) {
+  const res = await fetch(path, { credentials: 'omit', ...options, headers: { ...(options.headers || {}) } });
+  const text = await res.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch { data = { raw: text }; }
+  if (!res.ok) {
+    const error = new Error(data?.error || data?.message || res.statusText || 'NASへの保存に失敗しました');
+    error.status = res.status;
+    throw error;
+  }
+  return data;
+}
+
 function showAuthenticatedUi(canUpload) {
   $('authGate').hidden = true;
   $('appShell').hidden = false;
@@ -1300,12 +1313,6 @@ async function bindPendingGroup() {
   }
 }
 
-async function sha256Hex(file) {
-  const buffer = await file.arrayBuffer();
-  const digest = await crypto.subtle.digest('SHA-256', buffer);
-  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
-}
-
 async function decodeImageFile(file) {
   if (typeof window.createImageBitmap === 'function') {
     try {
@@ -1447,6 +1454,126 @@ async function logout() {
   status('ログアウトしました');
 }
 
+function uploadResumeKey(file) {
+  return 'mrnks-upload:' + JSON.stringify([
+    state.familyId,
+    file.name,
+    file.size,
+    file.lastModified,
+  ]);
+}
+
+function readSavedUpload(key) {
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(key) || 'null');
+    if (!saved?.uploadToken || Date.parse(saved.expiresAt) <= Date.now() + 30_000) return null;
+    return saved;
+  } catch {
+    return null;
+  }
+}
+
+function saveUpload(key, upload) {
+  try { sessionStorage.setItem(key, JSON.stringify(upload)); } catch { /* resume remains best-effort */ }
+}
+
+function clearSavedUpload(key) {
+  try { sessionStorage.removeItem(key); } catch { /* ignore storage restrictions */ }
+}
+
+async function createNasUpload(file) {
+  return api('/api/families/' + encodeURIComponent(state.familyId) + '/uploads', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      filename: file.name,
+      mimeType: file.type || 'application/octet-stream',
+      sizeBytes: file.size,
+      clientLastModifiedAt: new Date(file.lastModified).toISOString(),
+    }),
+  });
+}
+
+async function putNasPart(upload, file, partIndex) {
+  const start = partIndex * upload.chunkSizeBytes;
+  const end = Math.min(file.size, start + upload.chunkSizeBytes);
+  const part = file.slice(start, end);
+  let lastError;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      return await gatewayApi(
+        upload.gatewayOrigin + '/v1/uploads/' + encodeURIComponent(upload.assetId) + '/parts/' + partIndex,
+        {
+          method: 'PUT',
+          headers: {
+            authorization: 'Bearer ' + upload.uploadToken,
+            'content-type': 'application/octet-stream',
+          },
+          body: part,
+        },
+      );
+    } catch (error) {
+      lastError = error;
+      if (error.status && error.status < 500) throw error;
+      if (attempt < 3) await new Promise((resolve) => window.setTimeout(resolve, 500 * (2 ** attempt)));
+    }
+  }
+  throw lastError;
+}
+
+async function uploadFileToNas(file) {
+  const resumeKey = uploadResumeKey(file);
+  let upload = readSavedUpload(resumeKey);
+  if (!upload) {
+    upload = await createNasUpload(file);
+    saveUpload(resumeKey, upload);
+  }
+
+  if (!upload.receipt) {
+    let progress;
+    try {
+      progress = await gatewayApi(
+        upload.gatewayOrigin + '/v1/uploads/' + encodeURIComponent(upload.assetId),
+        { headers: { authorization: 'Bearer ' + upload.uploadToken } },
+      );
+    } catch (error) {
+      if (![401, 403, 404].includes(error.status)) throw error;
+      clearSavedUpload(resumeKey);
+      upload = await createNasUpload(file);
+      saveUpload(resumeKey, upload);
+      progress = { uploadedParts: [] };
+    }
+
+    const uploadedParts = new Set(progress.uploadedParts || []);
+    for (let partIndex = 0; partIndex < upload.totalParts; partIndex += 1) {
+      if (!uploadedParts.has(partIndex)) await putNasPart(upload, file, partIndex);
+      const percent = Math.round(((partIndex + 1) / upload.totalParts) * 100);
+      appendStatus('送信中: ' + file.name + ' ' + percent + '%');
+    }
+
+    const completed = await gatewayApi(
+      upload.gatewayOrigin + '/v1/uploads/' + encodeURIComponent(upload.assetId) + '/complete',
+      {
+        method: 'POST',
+        headers: { authorization: 'Bearer ' + upload.uploadToken },
+      },
+    );
+    upload.receipt = completed.receipt;
+    saveUpload(resumeKey, upload);
+  }
+
+  const completionForm = new FormData();
+  completionForm.append('receipt', upload.receipt);
+  const notificationPreview = await createNotificationPreview(file);
+  if (notificationPreview) completionForm.append('notificationPreview', notificationPreview, 'preview.jpg');
+  const result = await api('/api/uploads/' + encodeURIComponent(upload.uploadId) + '/complete', {
+    method: 'POST',
+    body: completionForm,
+  });
+  clearSavedUpload(resumeKey);
+  return result;
+}
+
 async function uploadFiles() {
   await ensureSession();
   if (!state.familyId) throw new Error('家族グループがありません。');
@@ -1459,28 +1586,7 @@ async function uploadFiles() {
   try {
     for (const file of files) {
       appendStatus('準備中: ' + file.name);
-      const hash = await sha256Hex(file);
-      const notificationPreview = await createNotificationPreview(file);
-      const headers = {
-        'x-file-name': encodeURIComponent(file.name),
-        'x-client-sha256': hash,
-        'x-client-last-modified': new Date(file.lastModified).toISOString(),
-      };
-      let uploadBody = file;
-      if (notificationPreview && file.size <= 40 * 1024 * 1024) {
-        const form = new FormData();
-        form.append('original', file, file.name);
-        form.append('notificationPreview', notificationPreview, 'preview.jpg');
-        uploadBody = form;
-      } else {
-        headers['content-type'] = file.type || 'application/octet-stream';
-      }
-      appendStatus('送信中: ' + file.name);
-      await api('/api/families/' + encodeURIComponent(state.familyId) + '/media', {
-        method: 'PUT',
-        headers,
-        body: uploadBody,
-      });
+      await uploadFileToNas(file);
     }
     $('fileInput').value = '';
     updateFileSelection();

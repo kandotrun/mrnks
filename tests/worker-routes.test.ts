@@ -93,6 +93,21 @@ describe('public Worker routes', () => {
     expect(() => new Function(inlineModule!)).not.toThrow();
   });
 
+  it('uploads originals directly to the NAS gateway in resumable chunks and sends only the receipt/preview to the Worker', async () => {
+    const res = await worker.fetch(new Request('https://mrnks.2-38.com/'), fakeEnv());
+    const html = await res.text();
+
+    expect(html).toContain('async function uploadFileToNas');
+    expect(html).toContain("+ '/uploads', {");
+    expect(html).toContain("+ '/parts/' + partIndex");
+    expect(html).toContain('uploadedParts');
+    expect(html).toContain("+ '/complete'");
+    expect(html).toContain("completionForm.append('receipt'");
+    expect(html).toContain("completionForm.append('notificationPreview'");
+    const uploader = html.match(/async function uploadFileToNas[\s\S]*?async function uploadFiles/)?.[0] || '';
+    expect(uploader).not.toContain("form.append('file', file)");
+  });
+
   it('keeps the app login gate visible until the user chooses LINE Login', async () => {
     const res = await worker.fetch(new Request('https://mrnks.2-38.com/'), fakeEnv());
     const html = await res.text();

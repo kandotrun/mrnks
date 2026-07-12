@@ -24,7 +24,7 @@ describe('LINE group LIFF UI', () => {
     expect(html).toContain('id="groupSetupPanel"');
     expect(html).toContain("params.get('liff.state')");
     expect(html).toContain('groupBindingId');
-    expect(html).toContain("form.append('notificationPreview'");
+    expect(html).toContain("completionForm.append('notificationPreview'");
     expect(html).toContain('createNotificationPreview');
     expect(html).toContain("'/api/line-groups/bind'");
   });
