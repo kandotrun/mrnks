@@ -337,6 +337,109 @@ function fakeGalleryEnv(
   };
 }
 
+async function signTestNasToken(payload: Record<string, unknown>, secret = 'test-nas-secret'): Promise<string> {
+  const payloadBytes = new TextEncoder().encode(JSON.stringify(payload));
+  let binary = '';
+  for (const byte of payloadBytes) binary += String.fromCharCode(byte);
+  const encoded = btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  );
+  const signatureBytes = new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(encoded)));
+  let signatureBinary = '';
+  for (const byte of signatureBytes) signatureBinary += String.fromCharCode(byte);
+  const signature = btoa(signatureBinary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  return `${encoded}.${signature}`;
+}
+
+interface CompleteUploadCapture {
+  batches: Array<Array<{ sql: string; values: unknown[] }>>;
+  puts: string[];
+}
+
+function fakeCompleteUploadEnv(capture: CompleteUploadCapture): Env {
+  const statements: Array<{ sql: string; values: unknown[]; run(): Promise<unknown> }> = [];
+  const db = {
+    prepare(sql: string) {
+      return {
+        bind(...values: unknown[]) {
+          const statement = {
+            sql,
+            values,
+            async first<T>() {
+              if (sql.includes('FROM sessions s')) {
+                return {
+                  id: 'usr_1',
+                  display_name: 'Kan',
+                  picture_url: null,
+                  expires_at: new Date(Date.now() + 60_000).toISOString(),
+                  line_group_binding_id: null,
+                } as T;
+              }
+              if (sql.includes('FROM media_upload_sessions')) {
+                return {
+                  id: 'upl_1',
+                  asset_id: 'ast_1',
+                  family_id: 'fam_1',
+                  uploader_user_id: 'usr_1',
+                  original_filename: 'DSC00001.ARW',
+                  original_mime_type: 'image/x-sony-arw',
+                  original_size_bytes: 11,
+                  original_storage_key: 'originals/fam_1/ast_1/original.arw',
+                  client_last_modified_at: null,
+                  status: 'uploading',
+                  expires_at: new Date(Date.now() + 60_000).toISOString(),
+                } as T;
+              }
+              return null;
+            },
+            async all<T>() {
+              if (sql.includes('FROM family_members fm')) {
+                return { results: [{ id: 'fam_1', name: '家族', role: 'owner' }] as T[] };
+              }
+              return { results: [] as T[] };
+            },
+            async run() {
+              return { success: true, meta: { changes: 1 } };
+            },
+          };
+          statements.push(statement);
+          return statement;
+        },
+      };
+    },
+    async batch(batchStatements: Array<{ sql: string; values: unknown[]; run(): Promise<unknown> }>) {
+      capture.batches.push(batchStatements.map(({ sql, values }) => ({ sql, values })));
+      return Promise.all(batchStatements.map((statement) => statement.run()));
+    },
+  } as unknown as D1Database;
+  const bucket = {
+    async put(key: string) {
+      capture.puts.push(key);
+      return {};
+    },
+  } as unknown as R2Bucket;
+  return {
+    ENVIRONMENT: 'test',
+    APP_ORIGIN: 'https://mrnks.2-38.com',
+    LINE_LIFF_ID: 'test-liff-id',
+    LINE_LOGIN_CHANNEL_ID: 'login-channel',
+    LINE_LOGIN_CHANNEL_SECRET: 'login-secret',
+    LINE_MESSAGING_CHANNEL_ID: 'messaging-channel',
+    LINE_MESSAGING_CHANNEL_SECRET: 'messaging-secret',
+    LINE_MESSAGING_CHANNEL_ACCESS_TOKEN: 'messaging-token',
+    SESSION_SECRET: 'test-session-secret',
+    NAS_STORAGE_ORIGIN: 'https://upload.mrnks.2-38.com',
+    NAS_STORAGE_SECRET: 'test-nas-secret',
+    DB: db,
+    MEDIA_BUCKET: bucket,
+  } as Env;
+}
+
 interface UploadInitCapture {
   runs: Array<{ sql: string; values: unknown[] }>;
 }
@@ -404,6 +507,7 @@ interface DeleteCapture {
   pendingJob?: {
     asset_id: string;
     original_storage_key: string;
+    original_storage_backend?: 'r2' | 'nas';
     notification_preview_storage_key: string | null;
   } | null;
 }
@@ -413,6 +517,7 @@ function fakeDeleteEnv(
   capture: DeleteCapture,
   assetExists = true,
   assetFamilyId = 'fam_1',
+  storageBackend: 'r2' | 'nas' = 'r2',
 ): Env {
   const db = {
     prepare(sql: string) {
@@ -435,6 +540,7 @@ function fakeDeleteEnv(
                   id: 'ast_1',
                   family_id: assetFamilyId,
                   original_storage_key: 'originals/fam_1/ast_1/sample.arw',
+                  original_storage_backend: storageBackend,
                   notification_preview_storage_key: 'previews/fam_1/ast_1/line.jpg',
                 } as T;
               }
@@ -456,7 +562,8 @@ function fakeDeleteEnv(
                 capture.pendingJob = {
                   asset_id: String(values[0]),
                   original_storage_key: String(values[1]),
-                  notification_preview_storage_key: values[2] == null ? null : String(values[2]),
+                  original_storage_backend: values[2] === 'nas' ? 'nas' : 'r2',
+                  notification_preview_storage_key: values[3] == null ? null : String(values[3]),
                 };
               }
               if (sql.includes('DELETE FROM media_deletion_jobs')) capture.pendingJob = null;
@@ -493,6 +600,8 @@ function fakeDeleteEnv(
     LINE_MESSAGING_CHANNEL_SECRET: 'messaging-secret',
     LINE_MESSAGING_CHANNEL_ACCESS_TOKEN: 'messaging-token',
     SESSION_SECRET: 'test-session-secret',
+    NAS_STORAGE_ORIGIN: 'https://upload.mrnks.2-38.com',
+    NAS_STORAGE_SECRET: 'test-nas-secret',
     DB: db,
     MEDIA_BUCKET: bucket,
   };
@@ -540,6 +649,63 @@ describe('gallery and RAW previews', () => {
 
     expect(response.status).toBe(403);
     expect(capture.runs).toHaveLength(0);
+  });
+
+  it('spec: commits a NAS original only when the signed completion receipt matches the reserved upload', async () => {
+    const capture: CompleteUploadCapture = { batches: [], puts: [] };
+    const receipt = await signTestNasToken({
+      v: 1,
+      action: 'complete',
+      uploadId: 'upl_1',
+      assetId: 'ast_1',
+      familyId: 'fam_1',
+      key: 'originals/fam_1/ast_1/original.arw',
+      sizeBytes: 11,
+      sha256: 'b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9',
+      exp: Math.floor(Date.now() / 1000) + 300,
+    });
+    const response = await worker.fetch(new Request('https://mrnks.2-38.com/api/uploads/upl_1/complete', {
+      method: 'POST',
+      headers: {
+        cookie: 'mrnks_session=session-token',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ receipt }),
+    }), fakeCompleteUploadEnv(capture));
+
+    expect(response.status).toBe(201);
+    expect(capture.batches).toHaveLength(1);
+    const insert = capture.batches[0].find(({ sql }) => sql.includes('INSERT INTO media_assets'));
+    expect(insert?.sql).toContain('original_storage_backend');
+    expect(insert?.values).toContain('nas');
+    expect(insert?.values).toContain('b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9');
+  });
+
+  it('spec: rejects a mismatched NAS receipt without writing D1 or R2', async () => {
+    const capture: CompleteUploadCapture = { batches: [], puts: [] };
+    const receipt = await signTestNasToken({
+      v: 1,
+      action: 'complete',
+      uploadId: 'upl_1',
+      assetId: 'ast_wrong',
+      familyId: 'fam_1',
+      key: 'originals/fam_1/ast_1/original.arw',
+      sizeBytes: 11,
+      sha256: 'b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9',
+      exp: Math.floor(Date.now() / 1000) + 300,
+    });
+    const response = await worker.fetch(new Request('https://mrnks.2-38.com/api/uploads/upl_1/complete', {
+      method: 'POST',
+      headers: {
+        cookie: 'mrnks_session=session-token',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ receipt }),
+    }), fakeCompleteUploadEnv(capture));
+
+    expect(response.status).toBe(400);
+    expect(capture.batches).toHaveLength(0);
+    expect(capture.puts).toHaveLength(0);
   });
 
   it('selects a gallery-sized embedded JPEG instead of the full-resolution DNG preview', async () => {
@@ -672,6 +838,32 @@ describe('gallery and RAW previews', () => {
     },
   );
 
+  it('spec: deletes a NAS original through the signed gateway and only deletes its preview from R2', async () => {
+    const capture: DeleteCapture = { deletedKeys: [], runs: [] };
+    const gatewayFetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      expect(init?.method).toBe('DELETE');
+      expect(new Headers(init?.headers).get('authorization')).toMatch(/^Bearer /);
+      return new Response(null, { status: 204 });
+    });
+    vi.stubGlobal('fetch', gatewayFetch);
+    try {
+      const response = await worker.fetch(new Request('https://mrnks.2-38.com/api/media/ast_1', {
+        method: 'DELETE',
+        headers: { cookie: 'mrnks_session=test-token' },
+      }), fakeDeleteEnv('owner', capture, true, 'fam_1', 'nas'));
+
+      expect(response.status).toBe(200);
+      expect(gatewayFetch).toHaveBeenCalledWith(
+        'https://upload.mrnks.2-38.com/v1/objects/ast_1',
+        expect.objectContaining({ method: 'DELETE' }),
+      );
+      expect(capture.deletedKeys).toEqual(['previews/fam_1/ast_1/line.jpg']);
+      expect(capture.pendingJob).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('does not touch R2 when the atomic D1 deletion batch fails', async () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     const capture: DeleteCapture = {
@@ -711,6 +903,7 @@ describe('gallery and RAW previews', () => {
     expect(capture.pendingJob).toEqual({
       asset_id: 'ast_1',
       original_storage_key: 'originals/fam_1/ast_1/sample.arw',
+      original_storage_backend: 'r2',
       notification_preview_storage_key: 'previews/fam_1/ast_1/line.jpg',
     });
     expect(capture.deletedKeys).toEqual([]);
@@ -946,6 +1139,53 @@ describe('gallery and RAW previews', () => {
     expect(res.status).toBe(206);
     expect(res.headers.get('content-type')).toBe('video/mp4');
     expect(res.headers.get('content-disposition')).toBeNull();
+  });
+
+  it('spec: streams a NAS-backed original through a short-lived signed gateway request', async () => {
+    const rangeCalls: Array<{ offset?: number; length?: number }> = [];
+    const gatewayFetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      expect(new Headers(init?.headers).get('authorization')).toMatch(/^Bearer /);
+      expect(new Headers(init?.headers).get('range')).toBe('bytes=1-3');
+      return new Response(new TextEncoder().encode('bcd'), {
+        status: 206,
+        headers: {
+          'content-type': 'video/mp4',
+          'content-length': '3',
+          'content-range': 'bytes 1-3/5',
+          'accept-ranges': 'bytes',
+        },
+      });
+    });
+    vi.stubGlobal('fetch', gatewayFetch);
+    try {
+      const env = fakeGalleryEnv(new Uint8Array(), new Uint8Array(), rangeCalls, [], {
+        type: 'video',
+        original_filename: 'clip.mp4',
+        original_mime_type: 'video/mp4',
+        original_size_bytes: 5,
+        original_storage_key: 'originals/fam_1/ast_1/original.mp4',
+        original_storage_backend: 'nas',
+      });
+      Object.assign(env, {
+        NAS_STORAGE_ORIGIN: 'https://upload.mrnks.2-38.com',
+        NAS_STORAGE_SECRET: 'test-nas-secret',
+      });
+      const response = await worker.fetch(new Request('https://mrnks.2-38.com/api/media/ast_1/content', {
+        headers: {
+          cookie: 'mrnks_session=session-token',
+          range: 'bytes=1-3',
+        },
+      }), env);
+      expect(response.status).toBe(206);
+      expect(await response.text()).toBe('bcd');
+      expect(gatewayFetch).toHaveBeenCalledWith(
+        'https://upload.mrnks.2-38.com/v1/objects/ast_1',
+        expect.objectContaining({ method: 'GET' }),
+      );
+      expect(rangeCalls).toHaveLength(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('serves validated single-range responses with exact partial bytes', async () => {

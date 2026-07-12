@@ -106,6 +106,32 @@ const BROWSER_IMAGE_MIME_TYPES = new Set([
   'image/bmp',
 ]);
 
+interface NasUploadSession {
+  id: string;
+  asset_id: string;
+  family_id: string;
+  uploader_user_id: string;
+  original_filename: string;
+  original_mime_type: string;
+  original_size_bytes: number;
+  original_storage_key: string;
+  client_last_modified_at: string | null;
+  status: 'uploading' | 'finalizing' | 'ready' | 'expired' | 'failed';
+  expires_at: string;
+}
+
+interface NasCompletionReceipt {
+  v: number;
+  action: string;
+  uploadId: string;
+  assetId: string;
+  familyId: string;
+  key: string;
+  sizeBytes: number;
+  sha256: string;
+  exp: number;
+}
+
 interface StoredMediaAsset {
   id: string;
   family_id: string;
@@ -114,11 +140,13 @@ interface StoredMediaAsset {
   original_mime_type: string;
   original_size_bytes: number;
   original_storage_key: string;
+  original_storage_backend: 'r2' | 'nas';
 }
 
 interface MediaDeletionJob {
   asset_id: string;
   original_storage_key: string;
+  original_storage_backend: 'r2' | 'nas';
   notification_preview_storage_key: string | null;
 }
 
@@ -163,6 +191,11 @@ async function route(request: Request, env: Env, ctx?: ExecutionContext): Promis
   const familyUploadMatch = path.match(/^\/api\/families\/([^/]+)\/uploads$/);
   if (familyUploadMatch && request.method === 'POST') {
     return handleCreateNasUpload(request, env, decodeURIComponent(familyUploadMatch[1]));
+  }
+
+  const uploadCompleteMatch = path.match(/^\/api\/uploads\/([^/]+)\/complete$/);
+  if (uploadCompleteMatch && request.method === 'POST') {
+    return handleCompleteNasUpload(request, env, decodeURIComponent(uploadCompleteMatch[1]), ctx);
   }
 
   const familyMediaMatch = path.match(/^\/api\/families\/([^/]+)\/media$/);
@@ -344,6 +377,137 @@ async function handleCreateNasUpload(request: Request, env: Env, familyId: strin
     totalParts,
     uploadToken,
     expiresAt,
+  }, { status: 201 });
+}
+
+async function handleCompleteNasUpload(
+  request: Request,
+  env: Env,
+  uploadId: string,
+  ctx?: ExecutionContext,
+): Promise<Response> {
+  const user = await requireUser(request, env);
+  if (!env.NAS_STORAGE_SECRET) throw new HttpError(503, 'nas_storage_unavailable');
+  const session = await env.DB.prepare(
+    `SELECT id, asset_id, family_id, uploader_user_id, original_filename, original_mime_type,
+            original_size_bytes, original_storage_key, client_last_modified_at, status, expires_at
+       FROM media_upload_sessions
+      WHERE id = ?
+      LIMIT 1`,
+  ).bind(uploadId).first<NasUploadSession>();
+  if (!session) throw new HttpError(404, 'upload_not_found');
+  if (session.uploader_user_id !== user.id) throw new HttpError(403, 'forbidden');
+  await requireFamilyRole(user, session.family_id, ['owner', 'admin', 'uploader']);
+  if (Date.parse(session.expires_at) < Date.now()) throw new HttpError(410, 'upload_expired');
+  if (session.status === 'ready') {
+    return jsonResponse({ ok: true, asset: { id: session.asset_id, familyId: session.family_id } });
+  }
+  if (session.status !== 'uploading' && session.status !== 'finalizing') {
+    throw new HttpError(409, 'upload_not_completable');
+  }
+
+  let receiptToken = '';
+  let notificationPreviewBytes: Uint8Array | null = null;
+  let notificationPreviewMimeType: 'image/jpeg' | 'image/png' | null = null;
+  const contentType = request.headers.get('content-type') || '';
+  if (contentType.toLowerCase().startsWith('multipart/form-data')) {
+    const form = await request.formData();
+    const receiptValue = form.get('receipt');
+    if (typeof receiptValue === 'string') receiptToken = receiptValue;
+    const preview = form.get('notificationPreview');
+    if (preview instanceof File && preview.size > 0) {
+      const previewMime = normalizeMediaMimeType(preview.name || 'preview.jpg', preview.type);
+      const previewBytes = new Uint8Array(await preview.arrayBuffer());
+      assertLineNotificationPreview(previewBytes, previewMime);
+      notificationPreviewBytes = previewBytes;
+      notificationPreviewMimeType = previewMime as 'image/jpeg' | 'image/png';
+    }
+  } else {
+    const body = await request.json().catch(() => null) as { receipt?: unknown } | null;
+    if (typeof body?.receipt === 'string') receiptToken = body.receipt;
+  }
+  if (!receiptToken) throw new HttpError(400, 'completion_receipt_required');
+  const receipt = await verifyNasToken(receiptToken, env.NAS_STORAGE_SECRET) as unknown as NasCompletionReceipt;
+  const receiptMatches = receipt.action === 'complete'
+    && receipt.uploadId === session.id
+    && receipt.assetId === session.asset_id
+    && receipt.familyId === session.family_id
+    && receipt.key === session.original_storage_key
+    && receipt.sizeBytes === session.original_size_bytes
+    && /^[a-f0-9]{64}$/.test(receipt.sha256);
+  if (!receiptMatches) throw new HttpError(400, 'completion_receipt_mismatch');
+
+  let notificationPreviewStorageKey: string | null = null;
+  if (notificationPreviewBytes && notificationPreviewMimeType) {
+    const extension = notificationPreviewMimeType === 'image/png' ? 'png' : 'jpg';
+    notificationPreviewStorageKey = `previews/${session.family_id}/${session.asset_id}/line.${extension}`;
+    await env.MEDIA_BUCKET.put(notificationPreviewStorageKey, notificationPreviewBytes, {
+      httpMetadata: { contentType: notificationPreviewMimeType },
+      customMetadata: { mediaAssetId: session.asset_id, purpose: 'line-notification' },
+    });
+  }
+
+  const uploadedAt = nowIso();
+  try {
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO media_assets (
+          id, family_id, uploader_user_id, type, original_filename, original_mime_type,
+          original_size_bytes, original_sha256, original_storage_key, original_storage_backend,
+          client_last_modified_at, notification_preview_storage_key, notification_preview_mime_type,
+          notification_preview_size_bytes, uploaded_at, processing_status, visibility
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ready', 'family')`,
+      ).bind(
+        session.asset_id,
+        session.family_id,
+        user.id,
+        mediaTypeFromMime(session.original_mime_type),
+        session.original_filename,
+        session.original_mime_type,
+        session.original_size_bytes,
+        receipt.sha256,
+        session.original_storage_key,
+        'nas',
+        session.client_last_modified_at,
+        notificationPreviewStorageKey,
+        notificationPreviewMimeType,
+        notificationPreviewBytes?.byteLength ?? null,
+        uploadedAt,
+      ),
+      env.DB.prepare(
+        `UPDATE media_upload_sessions
+            SET status = 'ready', completed_at = ?
+          WHERE id = ? AND status IN ('uploading', 'finalizing')`,
+      ).bind(uploadedAt, session.id),
+    ]);
+  } catch (error) {
+    if (notificationPreviewStorageKey) await env.MEDIA_BUCKET.delete(notificationPreviewStorageKey).catch(() => undefined);
+    throw error;
+  }
+
+  const notificationTask = notifyLineGroupsForAsset(env, {
+    id: session.asset_id,
+    familyId: session.family_id,
+    originalFilename: session.original_filename,
+    notificationPreviewStorageKey,
+  }, user, getOrigin(request, env.APP_ORIGIN)).catch((error) => {
+    console.error('line upload notification failed', error instanceof Error ? error.message : String(error));
+  });
+  if (ctx) ctx.waitUntil(notificationTask);
+  else await notificationTask;
+
+  return jsonResponse({
+    ok: true,
+    asset: {
+      id: session.asset_id,
+      familyId: session.family_id,
+      originalFilename: session.original_filename,
+      mimeType: session.original_mime_type,
+      sizeBytes: session.original_size_bytes,
+      sha256: receipt.sha256,
+      uploadedAt,
+      storageBackend: 'nas',
+    },
   }, { status: 201 });
 }
 
@@ -669,7 +833,8 @@ async function handleListMedia(request: Request, env: Env, familyId: string): Pr
 async function loadAuthorizedMediaAsset(request: Request, env: Env, assetId: string): Promise<StoredMediaAsset> {
   const user = await requireUser(request, env);
   const asset = await env.DB.prepare(
-    `SELECT id, family_id, type, original_filename, original_mime_type, original_size_bytes, original_storage_key
+    `SELECT id, family_id, type, original_filename, original_mime_type, original_size_bytes,
+            original_storage_key, original_storage_backend
        FROM media_assets
       WHERE id = ?
       LIMIT 1`,
@@ -682,7 +847,7 @@ async function loadAuthorizedMediaAsset(request: Request, env: Env, assetId: str
 async function handleDeleteMedia(request: Request, env: Env, assetId: string): Promise<Response> {
   const user = await requireUser(request, env);
   const asset = await env.DB.prepare(
-    `SELECT id, family_id, original_storage_key, notification_preview_storage_key
+    `SELECT id, family_id, original_storage_key, original_storage_backend, notification_preview_storage_key
        FROM media_assets
       WHERE id = ?
       LIMIT 1`,
@@ -690,6 +855,7 @@ async function handleDeleteMedia(request: Request, env: Env, assetId: string): P
     id: string;
     family_id: string;
     original_storage_key: string;
+    original_storage_backend: 'r2' | 'nas';
     notification_preview_storage_key: string | null;
   }>();
   if (!asset) throw new HttpError(404, 'asset_not_found');
@@ -699,13 +865,14 @@ async function handleDeleteMedia(request: Request, env: Env, assetId: string): P
   await env.DB.batch([
     env.DB.prepare(
       `INSERT INTO media_deletion_jobs (
-        asset_id, original_storage_key, notification_preview_storage_key,
+        asset_id, original_storage_key, original_storage_backend, notification_preview_storage_key,
         attempts, last_error, created_at, updated_at
-      ) VALUES (?, ?, ?, 0, NULL, ?, ?)
+      ) VALUES (?, ?, ?, ?, 0, NULL, ?, ?)
       ON CONFLICT(asset_id) DO NOTHING`,
     ).bind(
       asset.id,
       asset.original_storage_key,
+      asset.original_storage_backend,
       asset.notification_preview_storage_key,
       timestamp,
       timestamp,
@@ -718,6 +885,7 @@ async function handleDeleteMedia(request: Request, env: Env, assetId: string): P
   const storageDeleted = await processMediaDeletionJob(env, {
     asset_id: asset.id,
     original_storage_key: asset.original_storage_key,
+    original_storage_backend: asset.original_storage_backend,
     notification_preview_storage_key: asset.notification_preview_storage_key,
   });
   if (!storageDeleted) {
@@ -726,11 +894,32 @@ async function handleDeleteMedia(request: Request, env: Env, assetId: string): P
   return jsonResponse({ ok: true, assetId: asset.id });
 }
 
+async function deleteNasOriginal(env: Env, job: MediaDeletionJob): Promise<void> {
+  if (!env.NAS_STORAGE_ORIGIN || !env.NAS_STORAGE_SECRET) throw new Error('nas_storage_unavailable');
+  const token = await signNasToken({
+    v: 1,
+    action: 'delete',
+    assetId: job.asset_id,
+    key: job.original_storage_key,
+    exp: Math.floor(Date.now() / 1000) + 5 * 60,
+  }, env.NAS_STORAGE_SECRET);
+  const response = await fetch(
+    `${env.NAS_STORAGE_ORIGIN.replace(/\/$/, '')}/v1/objects/${encodeURIComponent(job.asset_id)}`,
+    { method: 'DELETE', headers: { authorization: `Bearer ${token}` } },
+  );
+  if (!response.ok && response.status !== 404) throw new Error(`nas_delete_failed:${response.status}`);
+}
+
 async function processMediaDeletionJob(env: Env, job: MediaDeletionJob): Promise<boolean> {
-  const storageKeys = [job.original_storage_key];
-  if (job.notification_preview_storage_key) storageKeys.push(job.notification_preview_storage_key);
   try {
-    await env.MEDIA_BUCKET.delete(storageKeys);
+    if (job.original_storage_backend === 'nas') {
+      await deleteNasOriginal(env, job);
+      if (job.notification_preview_storage_key) await env.MEDIA_BUCKET.delete(job.notification_preview_storage_key);
+    } else {
+      const storageKeys = [job.original_storage_key];
+      if (job.notification_preview_storage_key) storageKeys.push(job.notification_preview_storage_key);
+      await env.MEDIA_BUCKET.delete(storageKeys);
+    }
     await env.DB.prepare('DELETE FROM media_deletion_jobs WHERE asset_id = ?').bind(job.asset_id).run();
     return true;
   } catch (error) {
@@ -751,7 +940,7 @@ async function processMediaDeletionJob(env: Env, job: MediaDeletionJob): Promise
 
 async function processPendingMediaDeletions(env: Env): Promise<void> {
   const jobs = await env.DB.prepare(
-    `SELECT asset_id, original_storage_key, notification_preview_storage_key
+    `SELECT asset_id, original_storage_key, original_storage_backend, notification_preview_storage_key
        FROM media_deletion_jobs
       ORDER BY created_at ASC
       LIMIT ?`,
@@ -792,6 +981,79 @@ async function handleLineNotificationPreview(env: Env, assetId: string, token: s
   });
 }
 
+type OriginalAsset = Pick<StoredMediaAsset,
+  'id' | 'original_storage_key' | 'original_storage_backend' | 'original_size_bytes' | 'original_mime_type' | 'original_filename'
+>;
+
+interface OriginalBodyResult {
+  body: ReadableStream | null;
+}
+
+async function fetchNasOriginal(
+  env: Env,
+  asset: Pick<OriginalAsset, 'id' | 'original_storage_key' | 'original_size_bytes' | 'original_mime_type' | 'original_filename'>,
+  range?: { offset: number; length: number },
+): Promise<Response> {
+  if (!env.NAS_STORAGE_ORIGIN || !env.NAS_STORAGE_SECRET) throw new HttpError(503, 'nas_storage_unavailable');
+  const token = await signNasToken({
+    v: 1,
+    action: 'read',
+    assetId: asset.id,
+    key: asset.original_storage_key,
+    sizeBytes: asset.original_size_bytes,
+    mimeType: asset.original_mime_type,
+    filename: asset.original_filename,
+    exp: Math.floor(Date.now() / 1000) + 5 * 60,
+  }, env.NAS_STORAGE_SECRET);
+  const headers = new Headers({ authorization: `Bearer ${token}` });
+  if (range) headers.set('range', `bytes=${range.offset}-${range.offset + range.length - 1}`);
+  let response: Response;
+  try {
+    response = await fetch(`${env.NAS_STORAGE_ORIGIN.replace(/\/$/, '')}/v1/objects/${encodeURIComponent(asset.id)}`, {
+      method: 'GET',
+      headers,
+    });
+  } catch {
+    throw new HttpError(503, 'nas_storage_unavailable');
+  }
+  if (response.status === 404) throw new HttpError(404, 'original_object_not_found');
+  if (!response.ok) throw new HttpError(503, 'nas_storage_unavailable');
+  return response;
+}
+
+async function getOriginalBody(
+  env: Env,
+  asset: OriginalAsset,
+  range?: { offset: number; length: number },
+): Promise<OriginalBodyResult> {
+  if (asset.original_storage_backend === 'nas') {
+    const response = await fetchNasOriginal(env, asset, range);
+    return { body: response.body };
+  }
+  const object = range
+    ? await env.MEDIA_BUCKET.get(asset.original_storage_key, { range })
+    : await env.MEDIA_BUCKET.get(asset.original_storage_key);
+  if (!object) throw new HttpError(404, 'original_object_not_found');
+  return { body: object.body };
+}
+
+async function readOriginalBytes(
+  env: Env,
+  asset: OriginalAsset,
+  offset: number,
+  length: number,
+): Promise<Uint8Array | null> {
+  if (asset.original_storage_backend === 'nas') {
+    const response = await fetchNasOriginal(env, asset, { offset, length });
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    return bytes.byteLength === length ? bytes : null;
+  }
+  const object = await env.MEDIA_BUCKET.get(asset.original_storage_key, { range: { offset, length } });
+  if (!object) return null;
+  const bytes = await object.bytes();
+  return bytes.byteLength === length ? bytes : null;
+}
+
 async function handleMediaPreview(request: Request, env: Env, assetId: string): Promise<Response> {
   const asset = await loadAuthorizedMediaAsset(request, env, assetId);
   const rawFormat = rawPreviewFormat(asset.original_filename, asset.original_mime_type);
@@ -800,23 +1062,15 @@ async function handleMediaPreview(request: Request, env: Env, assetId: string): 
     const descriptor = await findRawJpegPreview({
       size: asset.original_size_bytes,
       async read(offset: number, length: number): Promise<Uint8Array | null> {
-        const object = await env.MEDIA_BUCKET.get(asset.original_storage_key, {
-          range: { offset, length },
-        });
-        if (!object) return null;
-        const bytes = await object.bytes();
-        return bytes.byteLength === length ? bytes : null;
+        return readOriginalBytes(env, asset, offset, length);
       },
     });
     if (!descriptor || descriptor.offset + descriptor.length > asset.original_size_bytes) {
       throw new HttpError(415, 'raw_preview_unavailable');
     }
 
-    const previewObject = await env.MEDIA_BUCKET.get(asset.original_storage_key, {
-      range: { offset: descriptor.offset, length: descriptor.length },
-    });
-    if (!previewObject) throw new HttpError(404, 'original_object_not_found');
-    const previewBytes = await previewObject.bytes();
+    const previewBytes = await readOriginalBytes(env, asset, descriptor.offset, descriptor.length);
+    if (!previewBytes) throw new HttpError(404, 'original_object_not_found');
     const completeLength = findCompleteJpegLength(previewBytes);
     if (previewBytes.byteLength !== descriptor.length || !completeLength) {
       throw new HttpError(415, 'raw_preview_invalid');
@@ -839,8 +1093,7 @@ async function handleMediaPreview(request: Request, env: Env, assetId: string): 
   if (!BROWSER_IMAGE_MIME_TYPES.has(asset.original_mime_type)) {
     throw new HttpError(415, 'preview_unavailable');
   }
-  const object = await env.MEDIA_BUCKET.get(asset.original_storage_key);
-  if (!object) throw new HttpError(404, 'original_object_not_found');
+  const object = await getOriginalBody(env, asset);
   return new Response(object.body, {
     headers: {
       'content-type': asset.original_mime_type,
@@ -870,11 +1123,8 @@ async function handleMediaContent(request: Request, env: Env, assetId: string): 
   }
 
   const object = requestedRange.kind === 'partial'
-    ? await env.MEDIA_BUCKET.get(asset.original_storage_key, {
-      range: { offset: requestedRange.offset, length: requestedRange.length },
-    })
-    : await env.MEDIA_BUCKET.get(asset.original_storage_key);
-  if (!object) throw new HttpError(404, 'original_object_not_found');
+    ? await getOriginalBody(env, asset, { offset: requestedRange.offset, length: requestedRange.length })
+    : await getOriginalBody(env, asset);
 
   const inlineVideo = asset.type === 'video' && /^video\/[a-z0-9.+-]+$/i.test(asset.original_mime_type);
   const headers = new Headers({
@@ -922,13 +1172,17 @@ async function handleCreateDownloadUrl(request: Request, env: Env, assetId: stri
 async function handleDownload(request: Request, env: Env, token: string): Promise<Response> {
   const tokenHash = await hashSecretToken(token, env.SESSION_SECRET);
   const row = await env.DB.prepare(
-    `SELECT m.original_storage_key, m.original_filename, m.original_mime_type, m.original_size_bytes, d.expires_at
+    `SELECT m.id, m.type, m.original_storage_key, m.original_storage_backend,
+            m.original_filename, m.original_mime_type, m.original_size_bytes, d.expires_at
        FROM download_tokens d
        JOIN media_assets m ON m.id = d.media_asset_id
       WHERE d.token_hash = ?
       LIMIT 1`,
   ).bind(tokenHash).first<{
+    id: string;
+    type: 'image' | 'video' | 'other';
     original_storage_key: string;
+    original_storage_backend: 'r2' | 'nas';
     original_filename: string;
     original_mime_type: string;
     original_size_bytes: number;
@@ -937,8 +1191,7 @@ async function handleDownload(request: Request, env: Env, token: string): Promis
   if (!row) return textResponse('download token not found', { status: 404 });
   if (Date.parse(row.expires_at) < Date.now()) return textResponse('download token expired', { status: 410 });
 
-  const object = await env.MEDIA_BUCKET.get(row.original_storage_key);
-  if (!object) return textResponse('original object not found', { status: 404 });
+  const object = await getOriginalBody(env, row);
 
   const headers = new Headers();
   headers.set('content-type', row.original_mime_type);
@@ -1320,8 +1573,19 @@ function base64UrlEncode(bytes: Uint8Array): string {
   return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
-async function signNasToken(payload: Record<string, unknown>, secret: string): Promise<string> {
-  const encodedPayload = base64UrlEncode(new TextEncoder().encode(JSON.stringify(payload)));
+function base64UrlDecode(value: string): Uint8Array {
+  const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
+  const padded = normalized + '='.repeat((4 - normalized.length % 4) % 4);
+  let binary: string;
+  try {
+    binary = atob(padded);
+  } catch {
+    throw new HttpError(401, 'invalid_nas_token');
+  }
+  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+}
+
+async function nasTokenSignature(encodedPayload: string, secret: string): Promise<string> {
   const key = await crypto.subtle.importKey(
     'raw',
     new TextEncoder().encode(secret),
@@ -1330,7 +1594,30 @@ async function signNasToken(payload: Record<string, unknown>, secret: string): P
     ['sign'],
   );
   const signature = new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(encodedPayload)));
-  return `${encodedPayload}.${base64UrlEncode(signature)}`;
+  return base64UrlEncode(signature);
+}
+
+async function signNasToken(payload: Record<string, unknown>, secret: string): Promise<string> {
+  const encodedPayload = base64UrlEncode(new TextEncoder().encode(JSON.stringify(payload)));
+  return `${encodedPayload}.${await nasTokenSignature(encodedPayload, secret)}`;
+}
+
+async function verifyNasToken(token: string, secret: string): Promise<Record<string, unknown>> {
+  const parts = token.split('.');
+  if (parts.length !== 2) throw new HttpError(401, 'invalid_nas_token');
+  const expected = await nasTokenSignature(parts[0], secret);
+  if (!timingSafeEqual(expected, parts[1])) throw new HttpError(401, 'invalid_nas_token');
+  let payload: Record<string, unknown>;
+  try {
+    payload = JSON.parse(new TextDecoder().decode(base64UrlDecode(parts[0]))) as Record<string, unknown>;
+  } catch (error) {
+    if (error instanceof HttpError) throw error;
+    throw new HttpError(401, 'invalid_nas_token');
+  }
+  if (payload.v !== 1 || typeof payload.exp !== 'number' || payload.exp < Math.floor(Date.now() / 1000)) {
+    throw new HttpError(401, 'nas_token_expired');
+  }
+  return payload;
 }
 
 async function pushLineMessages(
